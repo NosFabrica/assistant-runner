@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject

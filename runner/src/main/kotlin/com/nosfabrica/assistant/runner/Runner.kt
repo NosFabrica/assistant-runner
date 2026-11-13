@@ -1,11 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.AssistantDirectory
-import com.nosfabrica.assistant.core.AssistantKey
-import com.nosfabrica.assistant.core.AssistantPair
-import com.nosfabrica.assistant.core.KeyFailure
-import com.nosfabrica.assistant.core.RunStore
-import com.nosfabrica.assistant.core.WakeRequest
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nipFBScheduledTasks.CronZone
 import com.vitorpamplona.quartz.nipFBScheduledTasks.ScheduledTask
@@ -28,7 +22,7 @@ enum class RunnerOutcome {
     /** The service answered `202`: it looks at the owner now. */
     WOKEN,
 
-    /** The service answered `200`: settled, nothing to do. */
+    /** The service answered `200`: settled, nothing to do. The occurrence is not woken again. */
     SETTLED,
 
     /** The service answered `429`: woken again after its `Retry-After`. */
@@ -69,7 +63,7 @@ enum class RunnerOutcome {
     NOT_RUNNABLE,
     NOT_DUE,
 
-    /** `assistant_runner.runs` has a row for the occurrence: the service started (or ran) it. */
+    /** The service already answered `200` (settled) for this occurrence: it started, ran or declined it. */
     ATTEMPTED,
 
     /** A device of the owner holds a live claim on the occurrence. */
@@ -124,18 +118,17 @@ class TaskServices(
 /**
  * The scheduler: one [poll] reads every owner's schedules that name their Assistant, decrypts
  * them with the Assistant's key, decides with Quartz's runner rules, and wakes the task's service
- * for an occurrence that is due. It signs nothing, spends nothing and writes nothing about runs:
- * "already started here" is a row the service wrote in [runs].
+ * for an occurrence that is due. It signs nothing, spends nothing and writes nothing anywhere:
+ * "already started here" is what the service answered, a `200` for the occurrence, kept in memory.
  */
 class Runner(
     private val directory: AssistantDirectory,
     private val nostr: RunnerNostr,
-    private val runs: RunStore,
     private val waker: TaskWaker,
     private val services: TaskServices,
     private val zoneOf: (String?) -> CronZone? = { it?.let(ZoneIdCronZone::of) },
     private val now: () -> Long = { TimeUtils.now() },
-    /** At most one wake per (task, owner, occurrence) this often, until the service writes a `runs` row. */
+    /** At most one wake per (task, owner, occurrence) this often, until the service answers it settled. */
     private val wakeRetrySeconds: Long = DEFAULT_WAKE_RETRY_SECONDS,
     /** How many schedules are decided (and woken) at once. */
     private val parallelism: Int = PARALLELISM,
@@ -154,6 +147,20 @@ class Runner(
      */
     private val nextWake = ConcurrentHashMap<WakeKey, Long>()
 
+    private data class TaskOf(
+        val task: String,
+        val owner: HexKey,
+    )
+
+    /**
+     * The newest occurrence of each (task, owner) the service answered `200` for: settled, so it is
+     * never woken again. Quartz's runner rules read it as this runner's own ended run
+     * ([OwnRun.ENDED]). In memory, one entry per (task, owner): a newer occurrence replaces the
+     * older, which is no longer the one due. A restart forgets it, which costs at most one wake per
+     * due occurrence, and the service answers that wake as settled again.
+     */
+    private val settled = ConcurrentHashMap<TaskOf, Long>()
+
     /** Each schedule's merged tags by event id: an event never changes, so neither does its plaintext. Never logged. */
     private val decrypted = ConcurrentHashMap<String, ScheduledTask>()
 
@@ -161,6 +168,8 @@ class Runner(
     suspend fun poll(): Map<ScheduleKey, RunnerOutcome> {
         val pairs = directory.pairs()
         val byOwner = pairs.associateBy { it.owner }
+        // An owner whose Assistant is gone takes its settled occurrences with it.
+        settled.keys.retainAll { it.owner in byOwner }
         val reads = nostr.schedules(byOwner.keys)
         decrypted.keys.retainAll(reads.map { it.event.id }.toSet())
         val at = now()
@@ -217,11 +226,12 @@ class Runner(
         val zone = zoneOf(task.tz) ?: return report(owner, RunnerOutcome.UNKNOWN_ZONE)
         val at = now()
 
-        // "Already started here" is the service's runs row, read before deciding, so Quartz's order holds.
-        val due = if (task.paused) null else ScheduledTaskClaims.occurrence(task, zone, at)
-        val own = due?.let { runs.ownRun(name, owner, it) } ?: OwnRun.NONE
+        // "Already started here" is the service's settled answer for the occurrence, so Quartz's order holds.
+        val settledOccurrence = settled[TaskOf(name, owner)]
         val decision =
-            ScheduledTaskClaims.decideAsRunner(task, name, pair.assistant, zone, at, ownRun = { if (it == due) own else OwnRun.NONE })
+            ScheduledTaskClaims.decideAsRunner(task, name, pair.assistant, zone, at, ownRun = {
+                if (it == settledOccurrence) OwnRun.ENDED else OwnRun.NONE
+            })
         if (!decision.shouldRun) return report(owner, verdictOutcome(decision.verdict))
         val occurrence = decision.occurrence!!
 
@@ -229,10 +239,11 @@ class Runner(
         nextWake[wakeKey]?.let { if (at < it) return report(owner, RunnerOutcome.WOKEN_RECENTLY) }
         if (!accepting()) return report(owner, RunnerOutcome.STOPPING)
         val answer = waker.wake(service, WakeRequest(name, owner, occurrence))
+        // When it may be woken again: null for never, the service having settled it.
         val (outcome, again, detail) =
             when (answer) {
                 WakeAnswer.Accepted -> Triple(RunnerOutcome.WOKEN, wakeRetrySeconds, null)
-                is WakeAnswer.Settled -> Triple(RunnerOutcome.SETTLED, wakeRetrySeconds, answer.outcome)
+                is WakeAnswer.Settled -> Triple(RunnerOutcome.SETTLED, null, answer.outcome)
                 // The service names when: honoured as given, within a day, whatever WAKE_RETRY_SECONDS says.
                 is WakeAnswer.Busy ->
                     Triple(
@@ -243,7 +254,13 @@ class Runner(
                 WakeAnswer.Malformed -> Triple(RunnerOutcome.WAKE_REFUSED, wakeRetrySeconds, null)
                 is WakeAnswer.Failed -> Triple(RunnerOutcome.WAKE_FAILED, wakeRetrySeconds, answer.reason)
             }
-        nextWake[wakeKey] = at + again
+        if (again == null) {
+            // Kept while it is the newest occurrence of this task settled for the owner.
+            settled.merge(TaskOf(name, owner), occurrence) { old, new -> maxOf(old, new) }
+            nextWake.remove(wakeKey)
+        } else {
+            nextWake[wakeKey] = at + again
+        }
         return report(owner, outcome, detail)
     }
 

@@ -9,7 +9,6 @@ pluginManagement {
 
 rootProject.name = "assistant-runner"
 
-include(":core")
 include(":runner")
 
 dependencyResolutionManagement {

@@ -1,9 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.Db
-import com.nosfabrica.assistant.core.LeaderLock
-import com.nosfabrica.assistant.core.Migrations
-import com.nosfabrica.assistant.core.TestPostgres
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -27,7 +23,6 @@ class RunnerLoopTest {
             RunnerLoop(
                 tryAcquire = { withContext(Dispatchers.IO) { lock.tryAcquire() } },
                 isAlive = { withContext(Dispatchers.IO) { lock.isAlive() } },
-                migrate = { Migrations.migrate(db) },
                 poll = { polls.incrementAndGet() },
                 stopping = { stop.get() },
                 pollMs = 50,

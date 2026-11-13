@@ -14,14 +14,12 @@ enum class LoopEnd {
 }
 
 /**
- * The runner's life: wait for the leader lock, migrate, then poll every [pollMs] while the lock
- * holds. A second runner (a rolling deploy's new pod) waits here and never polls until the first
+ * The runner's life: wait for the leader lock, then poll every [pollMs] while the lock holds. A second runner (a rolling deploy's new pod) waits here and never polls until the first
  * lets go. Checked every [tickMs] for a stop, and every [aliveCheckMs] for the lock.
  */
 class RunnerLoop(
     private val tryAcquire: suspend () -> Boolean,
     private val isAlive: suspend () -> Boolean,
-    private val migrate: suspend () -> Unit,
     private val poll: suspend () -> Unit,
     private val stopping: () -> Boolean,
     private val pollMs: Long,
@@ -32,7 +30,6 @@ class RunnerLoop(
     suspend fun run(): LoopEnd {
         if (!awaitLock()) return LoopEnd.STOPPED
         Log.i(TAG) { "leader lock taken" }
-        migrate()
         while (true) {
             if (stopping()) return LoopEnd.STOPPED
             if (!isAlive()) return lost()

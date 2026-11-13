@@ -1,6 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.WakeRequest
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import okhttp3.Headers

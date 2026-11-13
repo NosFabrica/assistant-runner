@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import org.junit.jupiter.api.Assumptions
 import java.io.File
@@ -62,9 +62,9 @@ object TestPostgres {
     }
 
     /**
-     * A login role on [db]'s server, with the plan's grants (PLAN.md, "Roles and grants"): SELECT
-     * on the four columns of `brainstorm_nsec` the services read, and the `assistant_runner`
-     * schema as its own. Connects with [password].
+     * A login role on [db]'s server, with the runner's one grant (PLAN.md, "Roles and grants"):
+     * SELECT on the four columns of `brainstorm_nsec` it reads. No schema, no CREATE: the runner
+     * writes nothing, and its advisory lock needs no grant. Connects with [password].
      */
     fun runnerRole(
         db: Db,
@@ -81,7 +81,6 @@ object TestPostgres {
             c.createStatement().use { st ->
                 st.execute("CREATE ROLE $name LOGIN PASSWORD '$password'")
                 st.execute("GRANT SELECT (${AssistantKeys.COLUMNS.joinToString()}) ON ${AssistantKeys.TABLE} TO $name")
-                st.execute("CREATE SCHEMA IF NOT EXISTS ${Migrations.SCHEMA} AUTHORIZATION $name")
             }
         }
         return Db(db.url, name, password)
@@ -159,9 +158,9 @@ object TestPostgres {
 }
 
 /**
- * brainstorm_server's side, as much of it as the services read: the `brainstorm_nsec` table, shaped
+ * brainstorm_server's side, as much of it as the runner reads: the `brainstorm_nsec` table, shaped
  * as `app/db_models`' `BrainstormNsec` (with one column the role may not read, `session_version`).
- * There is no view: the services read the table's four columns as the server's own repo does.
+ * There is no view: the runner reads the table's four columns as the server's own repo does.
  */
 object BrainstormSchema {
     fun create(db: Db) {

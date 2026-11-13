@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -8,10 +8,10 @@ import java.sql.Connection
 import java.util.Properties
 
 /**
- * brainstorm_server's Postgres, through plain JDBC. One connection per operation and no pool: the
- * runner makes a handful of calls a poll, a task service a handful a run, and a pool's idle
- * connections would be one more thing to size, health-check and leak. The leader lock keeps its
- * own connection ([LeaderLock]).
+ * brainstorm_server's Postgres, through plain JDBC, read-only: the runner reads four columns of
+ * `brainstorm_nsec` ([AssistantKeys]) and holds an advisory lock ([LeaderLock], on a connection of
+ * its own), and writes nothing. One connection per operation and no pool: a poll makes a handful
+ * of calls, and a pool's idle connections would be one more thing to size, health-check and leak.
  *
  * Every call runs on [io]: JDBC blocks. The password is never part of [toString].
  */
@@ -42,18 +42,6 @@ class Db(
 
     /** [block] on a fresh connection, on the IO dispatcher. */
     suspend fun <T> use(block: (Connection) -> T): T = withContext(io) { connect().use(block) }
-
-    /** [block] in one transaction: committed when it returns, rolled back when it throws. */
-    suspend fun <T> transaction(block: (Connection) -> T): T =
-        use { c ->
-            c.autoCommit = false
-            try {
-                block(c).also { c.commit() }
-            } catch (e: Throwable) {
-                c.rollback()
-                throw e
-            }
-        }
 
     // Without the query: a JDBC URL may carry `?password=`.
     override fun toString() = "Db(${url.substringBefore('?')})"

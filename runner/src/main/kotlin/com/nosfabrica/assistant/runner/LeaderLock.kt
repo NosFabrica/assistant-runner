@@ -1,10 +1,16 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import com.vitorpamplona.quartz.utils.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.sql.Connection
 import java.sql.SQLException
+
+/** The advisory-lock keys the runner takes. Advisory locks are per database, so they're spelled out once, here. */
+object AdvisoryLocks {
+    /** Held by the one active runner for its whole life ([LeaderLock]). ASCII "asr-lead". */
+    const val RUNNER_LEADER = 0x6173722d6c656164L
+}
 
 /**
  * Exactly one active runner: a session-level `pg_try_advisory_lock` on a connection of its own,

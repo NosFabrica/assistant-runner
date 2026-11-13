@@ -1,6 +1,0 @@
-# Publishes :core for the task services (the Observer). The repository is private for now, so
-# this is for later: JitPack builds a private repository only with an authorised token.
-jdk:
-  - openjdk21
-install:
-  - ./gradlew :core:publishToMavenLocal --no-daemon --console=plain -x test

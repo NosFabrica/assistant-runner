@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
@@ -75,7 +75,8 @@ interface AssistantDirectory {
 /**
  * brainstorm_server's `brainstorm_nsec` table, read as its own repo (`app/repos/brainstorm_nsec.py`)
  * reads it, and its Fernet key file. Only four columns ([COLUMNS]), the ones ops grants the role:
- * the services are coupled to them, so a server migration that renames or drops one breaks them.
+ * the runner is coupled to them, so a server migration that renames or drops one breaks it. The
+ * task services read the same columns with code of their own: nothing here is shared with them.
  *
  * - [page] is the server's `select_owner_assistant_pairs_on_db`: `pubkey` and `assistant_pubkey`
  *   where an Assistant is set, by `pubkey`; nothing is decrypted.

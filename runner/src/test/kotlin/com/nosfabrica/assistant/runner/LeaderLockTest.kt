@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import kotlin.test.Test
 import kotlin.test.assertFalse

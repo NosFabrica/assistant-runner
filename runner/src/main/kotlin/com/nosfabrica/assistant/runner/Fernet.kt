@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import java.security.GeneralSecurityException
 import java.security.MessageDigest

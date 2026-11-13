@@ -1,7 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.MemoryRunStore
-import com.nosfabrica.assistant.core.RunStore
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nipFBScheduledTasks.ScheduledTask
@@ -33,7 +31,6 @@ abstract class RunnerWorld {
     protected val observerService = "http://observer:8080"
 
     protected val relays = FakeRelays()
-    protected val runs: RunStore = MemoryRunStore()
     protected val directory = FakeDirectory(mapOf(owner.pubKey to assistant, stranger.pubKey to strangersAssistant))
     protected val waker = FakeWaker()
     protected val services = TaskServices(mapOf("observer" to observerService))
@@ -48,7 +45,6 @@ abstract class RunnerWorld {
     ) = Runner(
         directory = directory,
         nostr = RunnerNostr(access, setOf(index), null, now = { clock }),
-        runs = runs,
         waker = waker,
         services = services,
         now = { clock },

@@ -1,8 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.KeyFailure
-import com.nosfabrica.assistant.core.WakeRequest
-import com.nosfabrica.assistant.core.capturingLogs
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import com.vitorpamplona.quartz.nip19Bech32.toNsec
 import com.vitorpamplona.quartz.nip51Lists.encryption.PrivateTagsInContent
@@ -124,16 +121,42 @@ class RunnerTest : RunnerWorld() {
         }
 
     @Test
-    fun anOccurrenceWithARunsRowIsNotWoken() =
+    fun aSettledAnswerStopsFurtherWakes() =
         runTest {
             world()
             schedule()
-            // The service claimed it (and may be printing it, or have ended it).
-            runs.claim("observer", owner.pubKey, six)
+            // The service has a run of it (printing, or ended): it answers 200, settled.
+            waker.answer = { WakeAnswer.Settled("ATTEMPTED") }
+            assertEquals(RunnerOutcome.SETTLED, runner.poll()[mine])
+            // Never again for that occurrence, however long after: Quartz reads it as this runner's own run.
+            for (later in listOf(600L, 3_600L, 6 * 3_600L)) {
+                clock = now + later
+                assertEquals(RunnerOutcome.ATTEMPTED, runner.poll()[mine])
+            }
+            assertEquals(1, waker.wakes.size)
+            // The next morning's occurrence is a new one, and is woken.
+            waker.answer = { WakeAnswer.Accepted }
+            clock = now + 86_400
+            assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
+            assertEquals(listOf(six, six + 86_400), waker.wakes.map { it.second.occurrence })
+        }
+
+    @Test
+    fun aRestartWakesOnceAndAcceptsTheSettledAnswer() =
+        runTest {
+            world()
+            schedule()
+            waker.answer = { WakeAnswer.Settled("ATTEMPTED") }
+            assertEquals(RunnerOutcome.SETTLED, runner.poll()[mine])
             assertEquals(RunnerOutcome.ATTEMPTED, runner.poll()[mine])
-            runs.end("observer", owner.pubKey, six, "PRINTED")
-            assertEquals(RunnerOutcome.ATTEMPTED, runner.poll()[mine])
-            assertTrue(waker.wakes.isEmpty())
+            // A new process remembers nothing: it wakes the occurrence once more, and the service
+            // answers it settled again.
+            val restarted = runnerWith()
+            clock += 60
+            assertEquals(RunnerOutcome.SETTLED, restarted.poll()[mine])
+            clock += 600
+            assertEquals(RunnerOutcome.ATTEMPTED, restarted.poll()[mine])
+            assertEquals(listOf(six, six), waker.wakes.map { it.second.occurrence })
         }
 
     @Test
@@ -157,20 +180,22 @@ class RunnerTest : RunnerWorld() {
         }
 
     @Test
-    fun aSettledOrFailedWakeWaitsTheRetryTime() =
+    fun aFailedOrRefusedWakeWaitsTheRetryTime() =
         runTest {
             world()
             schedule()
-            waker.answer = { WakeAnswer.Settled("NOT_DUE") }
-            assertEquals(RunnerOutcome.SETTLED, runner.poll()[mine])
+            waker.answer = { WakeAnswer.Failed("http 503") }
+            assertEquals(RunnerOutcome.WAKE_FAILED, runner.poll()[mine])
             clock += 599
             assertEquals(RunnerOutcome.WOKEN_RECENTLY, runner.poll()[mine])
             clock += 1
-            waker.answer = { WakeAnswer.Failed("http 503") }
-            assertEquals(RunnerOutcome.WAKE_FAILED, runner.poll()[mine])
-            clock += 600
             waker.answer = { WakeAnswer.Malformed }
             assertEquals(RunnerOutcome.WAKE_REFUSED, runner.poll()[mine])
+            clock += 599
+            assertEquals(RunnerOutcome.WOKEN_RECENTLY, runner.poll()[mine])
+            clock += 1
+            waker.answer = { WakeAnswer.Settled("NOT_DUE") }
+            assertEquals(RunnerOutcome.SETTLED, runner.poll()[mine])
             assertEquals(3, waker.wakes.size)
         }
 

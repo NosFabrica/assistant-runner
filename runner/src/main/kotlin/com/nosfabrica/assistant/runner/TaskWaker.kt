@@ -1,7 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.SettledAnswer
-import com.nosfabrica.assistant.core.WakeRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -73,7 +71,7 @@ class HttpTaskWaker(
                         200 -> {
                             // Bounded: an answer is a few bytes, and only an enum name from it is ever logged.
                             val body = response.body.byteStream().use { it.readNBytes(MAX_ANSWER_BYTES) }
-                            WakeAnswer.Settled(SettledAnswer.parse(body.decodeToString())?.outcome)
+                            WakeAnswer.Settled(SettledAnswer.outcomeOf(body.decodeToString()))
                         }
 
                         429 -> {

@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 /**
  * Whether [s] is a pubkey as Nostr events carry it: 64 lowercase hex digits. Quartz's

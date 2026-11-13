@@ -1,4 +1,4 @@
-package com.nosfabrica.assistant.core
+package com.nosfabrica.assistant.runner
 
 import com.vitorpamplona.quartz.utils.Log
 import java.io.IOException

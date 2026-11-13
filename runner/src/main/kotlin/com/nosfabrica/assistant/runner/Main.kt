@@ -1,11 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.AssistantKeys
-import com.nosfabrica.assistant.core.Db
-import com.nosfabrica.assistant.core.FernetKeyFile
-import com.nosfabrica.assistant.core.LeaderLock
-import com.nosfabrica.assistant.core.Migrations
-import com.nosfabrica.assistant.core.PostgresRunStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
@@ -120,7 +114,6 @@ fun main() {
         Runner(
             directory = AssistantKeys(config.db, keys),
             nostr = RunnerNostr(QuartzRelayAccess(client), index, search),
-            runs = PostgresRunStore(config.db),
             waker = HttpTaskWaker(serviceClient),
             services = config.services,
             wakeRetrySeconds = config.wakeRetrySeconds,
@@ -130,7 +123,6 @@ fun main() {
         RunnerLoop(
             tryAcquire = { lock.tryAcquireAsync() },
             isAlive = { withContext(Dispatchers.IO) { lock.isAlive() } },
-            migrate = { Migrations.migrate(config.db) },
             poll = {
                 val outcomes = runner.poll()
                 Log.i(TAG) { "poll done: ${outcomes.size} schedules, ${outcomes.values.groupingBy { it }.eachCount()}" }
@@ -157,7 +149,7 @@ fun main() {
         try {
             runBlocking { scope.async { loop.run() }.await() }
         } catch (e: Exception) {
-            // Cancelled by the shutdown hook, or the migration failed: the class only.
+            // Cancelled by the shutdown hook, or the loop failed: the class only.
             if (!stopping.get()) Log.e(TAG) { "stopped: ${e.javaClass.simpleName}" }
             if (stopping.get()) LoopEnd.STOPPED else null
         } finally {
@@ -165,7 +157,7 @@ fun main() {
             client.disconnect()
             done.countDown()
         }
-    // 4: the lock was lost; 5: the migration or the loop failed. Either way the orchestrator restarts it.
+    // 4: the lock was lost; 5: the loop failed. Either way the orchestrator restarts it.
     if (end == LoopEnd.LEADERSHIP_LOST) exitProcess(4)
     if (end == null) exitProcess(5)
 }

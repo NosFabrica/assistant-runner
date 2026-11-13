@@ -1,10 +1,5 @@
 package com.nosfabrica.assistant.runner
 
-import com.nosfabrica.assistant.core.AssistantDirectory
-import com.nosfabrica.assistant.core.AssistantKey
-import com.nosfabrica.assistant.core.AssistantPair
-import com.nosfabrica.assistant.core.KeyFailure
-import com.nosfabrica.assistant.core.WakeRequest
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
