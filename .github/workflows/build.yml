@@ -1,0 +1,56 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # The Postgres the store, migration and lock tests run against. Nothing else in the build
+    # talks to a network service: relays and task services are fakes.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: runner_test
+          POSTGRES_PASSWORD: runner_test
+          POSTGRES_DB: runner_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runner_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Read by the test fixture (core/src/testFixtures) when it can't start a cluster of its
+      # own. A superuser: the fixture creates a database per test class, and roles.
+      TEST_DATABASE_URL: jdbc:postgresql://localhost:5432/runner_test
+      TEST_DATABASE_USER: runner_test
+      TEST_DATABASE_PASSWORD: runner_test
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # `build` is compile + test + spotlessCheck.
+      - name: Build, test and check formatting
+        run: ./gradlew build --no-daemon --console=plain
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: '**/build/test-results/test/*.xml'
+          if-no-files-found: warn
