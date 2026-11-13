@@ -147,19 +147,19 @@ class Runner(
      */
     private val nextWake = ConcurrentHashMap<WakeKey, Long>()
 
-    private data class TaskOf(
-        val task: String,
-        val owner: HexKey,
-    )
-
     /**
-     * The newest occurrence of each (task, owner) the service answered `200` for: settled, so it is
-     * never woken again. Quartz's runner rules read it as this runner's own ended run
-     * ([OwnRun.ENDED]). In memory, one entry per (task, owner): a newer occurrence replaces the
-     * older, which is no longer the one due. A restart forgets it, which costs at most one wake per
-     * due occurrence, and the service answers that wake as settled again.
+     * The occurrences the service answered `200` for, with when: settled, so each is never woken
+     * again. Quartz's runner rules read one as this runner's own ended run ([OwnRun.ENDED]). Kept
+     * per occurrence, not one per (task, owner): two schedules of one task (06:00 and 06:15) each
+     * settle their own, and neither unsettles the other. In memory: an occurrence older than
+     * [SETTLED_KEEP_SECONDS] is dropped (no schedule is due at it any more), and so is an owner's
+     * whose Assistant is gone. A restart forgets them, which costs at most one wake per due
+     * occurrence, and the service answers that wake as settled again.
      */
-    private val settled = ConcurrentHashMap<TaskOf, Long>()
+    private val settled = ConcurrentHashMap<WakeKey, Long>()
+
+    /** The occurrences a wake is under way for: a second schedule due at the same one waits its turn, then finds it woken. */
+    private val waking = ConcurrentHashMap.newKeySet<WakeKey>()
 
     /** Each schedule's merged tags by event id: an event never changes, so neither does its plaintext. Never logged. */
     private val decrypted = ConcurrentHashMap<String, ScheduledTask>()
@@ -168,8 +168,9 @@ class Runner(
     suspend fun poll(): Map<ScheduleKey, RunnerOutcome> {
         val pairs = directory.pairs()
         val byOwner = pairs.associateBy { it.owner }
-        // An owner whose Assistant is gone takes its settled occurrences with it.
-        settled.keys.retainAll { it.owner in byOwner }
+        // An owner whose Assistant is gone takes its settled occurrences with it; so does time.
+        val oldest = now() - SETTLED_KEEP_SECONDS
+        settled.keys.retainAll { it.owner in byOwner && it.occurrence >= oldest }
         val reads = nostr.schedules(byOwner.keys)
         decrypted.keys.retainAll(reads.map { it.event.id }.toSet())
         val at = now()
@@ -227,18 +228,34 @@ class Runner(
         val at = now()
 
         // "Already started here" is the service's settled answer for the occurrence, so Quartz's order holds.
-        val settledOccurrence = settled[TaskOf(name, owner)]
         val decision =
             ScheduledTaskClaims.decideAsRunner(task, name, pair.assistant, zone, at, ownRun = {
-                if (it == settledOccurrence) OwnRun.ENDED else OwnRun.NONE
+                if (settled.containsKey(WakeKey(name, owner, it))) OwnRun.ENDED else OwnRun.NONE
             })
         if (!decision.shouldRun) return report(owner, verdictOutcome(decision.verdict))
         val occurrence = decision.occurrence!!
 
         val wakeKey = WakeKey(name, owner, occurrence)
-        nextWake[wakeKey]?.let { if (at < it) return report(owner, RunnerOutcome.WOKEN_RECENTLY) }
+        // One wake at a time per occurrence: another schedule of the same task due at it finds it woken, or settled.
+        if (!waking.add(wakeKey)) return report(owner, RunnerOutcome.WOKEN_RECENTLY)
+        try {
+            return wake(wakeKey, service, at)
+        } finally {
+            waking.remove(wakeKey)
+        }
+    }
+
+    /** Wakes [key]'s service, unless it was woken too recently or settled meanwhile. Called holding [waking] for [key]. */
+    private suspend fun wake(
+        key: WakeKey,
+        service: String,
+        at: Long,
+    ): RunnerOutcome {
+        val owner = key.owner
+        if (settled.containsKey(key)) return report(owner, RunnerOutcome.ATTEMPTED)
+        nextWake[key]?.let { if (at < it) return report(owner, RunnerOutcome.WOKEN_RECENTLY) }
         if (!accepting()) return report(owner, RunnerOutcome.STOPPING)
-        val answer = waker.wake(service, WakeRequest(name, owner, occurrence))
+        val answer = waker.wake(service, WakeRequest(key.task, owner, key.occurrence))
         // When it may be woken again: null for never, the service having settled it.
         val (outcome, again, detail) =
             when (answer) {
@@ -255,11 +272,10 @@ class Runner(
                 is WakeAnswer.Failed -> Triple(RunnerOutcome.WAKE_FAILED, wakeRetrySeconds, answer.reason)
             }
         if (again == null) {
-            // Kept while it is the newest occurrence of this task settled for the owner.
-            settled.merge(TaskOf(name, owner), occurrence) { old, new -> maxOf(old, new) }
-            nextWake.remove(wakeKey)
+            settled[key] = at
+            nextWake.remove(key)
         } else {
-            nextWake[wakeKey] = at + again
+            nextWake[key] = at + again
         }
         return report(owner, outcome, detail)
     }
@@ -342,6 +358,9 @@ class Runner(
         const val PARALLELISM = 8
 
         const val DEFAULT_WAKE_RETRY_SECONDS = 600L
+
+        /** How long a settled occurrence is remembered: past two days no schedule is still due at it. */
+        const val SETTLED_KEEP_SECONDS = 2 * 86_400L
 
         /** The longest a service's `Retry-After` holds a wake back: past it, a broken header would silence an owner. */
         const val MAX_RETRY_AFTER_SECONDS = 86_400L

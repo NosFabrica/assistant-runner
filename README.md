@@ -57,8 +57,10 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    `200 {outcome}` for (task, owner, occurrence), kept in memory.
 7. Wakes `POST {TASK_URL_<TASK>}/v1/run` with `{"v":1,"task","owner","occurrence"}`, at most once
    per (task, owner, occurrence) every `WAKE_RETRY_SECONDS`, or after a `429`'s `Retry-After`,
-   until the service answers `200`: then never again for that occurrence. A restart forgets what
-   was settled, which costs at most one wake per due occurrence, answered as settled.
+   until the service answers `200`: then never again for that occurrence (kept per occurrence, for
+   two days, so two schedules of one task settle each their own; two due at the same occurrence
+   wake it once). A restart forgets what was settled, which costs at most one wake per due
+   occurrence, answered as settled.
 
 The runner writes nothing, to Postgres or anywhere else.
 

@@ -5,6 +5,7 @@ import com.vitorpamplona.quartz.nip19Bech32.toNsec
 import com.vitorpamplona.quartz.nip51Lists.encryption.PrivateTagsInContent
 import com.vitorpamplona.quartz.nipFBScheduledTasks.ScheduledTask
 import com.vitorpamplona.quartz.nipFBScheduledTasks.ScheduledTaskEvent
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -178,6 +179,52 @@ class RunnerTest : RunnerWorld() {
             clock = now + 86_400
             assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
             assertEquals(listOf(six, six + 86_400), waker.wakes.map { it.second.occurrence })
+        }
+
+    @Test
+    fun twoSchedulesOfOneTaskEachSettleTheirOwnOccurrence() =
+        runTest {
+            world()
+            // The same task twice: 06:00 and 06:15. Each occurrence is settled on its own.
+            schedule()
+            val quarter = ScheduledTask.create("late", "observer", "15 6 * * *", "Europe/London", setAt = 0).withRunner(assistant.pubKey, 0)
+            schedule(quarter, d = "late")
+            waker.answer = { WakeAnswer.Settled("ATTEMPTED") }
+            repeat(6) {
+                runner.poll()
+                clock += 600
+            }
+            assertEquals(listOf(six, six + 900), waker.wakes.map { it.second.occurrence }.sorted())
+        }
+
+    @Test
+    fun twoSchedulesDueAtTheSameOccurrenceWakeItOnce() =
+        runTest {
+            world()
+            schedule()
+            schedule(task(d = "again"), d = "again")
+            // A wake that takes a moment: both schedules are decided while the first is under way.
+            val slow =
+                object : TaskWaker {
+                    override suspend fun wake(
+                        service: String,
+                        request: WakeRequest,
+                    ): WakeAnswer {
+                        delay(100)
+                        return waker.wake(service, request)
+                    }
+                }
+            val r =
+                Runner(
+                    directory = directory,
+                    nostr = RunnerNostr(relays, setOf(index), null, now = { clock }),
+                    waker = slow,
+                    services = services,
+                    now = { clock },
+                )
+            val outcomes = r.poll()
+            assertEquals(1, waker.wakes.size)
+            assertEquals(listOf(RunnerOutcome.WOKEN, RunnerOutcome.WOKEN_RECENTLY), outcomes.values.sorted())
         }
 
     @Test

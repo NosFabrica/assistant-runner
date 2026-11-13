@@ -99,9 +99,12 @@ Each poll (default every 5 minutes):
    `WAKE_RETRY_SECONDS` (default 600), or after a `429`'s `Retry-After`, until the service answers
    `200`. A `200 {outcome}` settles the occurrence: it is never woken again.
 
-Both the last wake and the settled occurrences are kept in memory only (the settled one per
-`(task, owner)`: a newer occurrence replaces the older). A restart forgets them, which costs at
-most one extra wake per due occurrence, and the service answers that wake as settled.
+Both the last wake and the settled occurrences are kept in memory only, per `(task, owner,
+occurrence)`: two schedules of one task (06:00 and 06:15) each settle their own. A settled
+occurrence is forgotten after two days, or with its owner's Assistant. Only one wake per
+occurrence is under way at a time, so two schedules due at the same occurrence wake it once. A
+restart forgets them, which costs at most one extra wake per due occurrence, and the service
+answers that wake as settled.
 
 The runner writes nothing, to Postgres or anywhere else, and never reads the services' state. The
 service is the one that spends, so it is the one that records.
