@@ -39,7 +39,8 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    `rate-limited:` or `blocked:`; at most 64 REQs a relay per 500 owners; each relay gets 20 s and
    2,000 events a read, never fewer than the `limit`; events must verify and be dated at most 10
    minutes ahead, checked before copies are deduplicated). It keeps the newest version of each
-   `d`. An owner's relay is asked through the SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
+   `d`. Only an owner's first 8 write relays are asked, and the owners' relays all together get
+   120 s a poll. An owner's relay is asked through the SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
    (`permessage-deflate` is not offered, and a relay that compresses anyway is dropped: OkHttp
    inflates a whole message in memory, past any byte count). At most 8 relays are read at once,
    so owners' relays can make one poll hold about 96 MB of frames at worst: give the container a

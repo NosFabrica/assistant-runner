@@ -223,4 +223,44 @@ class RunnerBoundsTest : RunnerWorld() {
             assertEquals(real.id, read.event.id)
             assertEquals(real.sig, read.event.sig)
         }
+
+    @Test
+    fun onlyAnOwnersFirstEightWriteRelaysAreAsked() =
+        runTest {
+            val many = List(30) { relay("wss://r$it.example") }
+            relays.put(index, owner.signed(10002, many.map { arrayOf("r", it.url, "write") }.toTypedArray(), createdAt = 1))
+            val event = schedule()
+            many.take(8).forEach { relays.put(it, event) }
+            val read = RunnerNostr(relays, setOf(index), null, now = { clock }).schedules(listOf(owner.pubKey)).single()
+            // The first eight hold it and answer: a quorum of the eight, the other 22 never asked.
+            assertTrue(read.quorum)
+            val asked = relays.asked.flatMap { it.first }.toSet()
+            assertEquals(many.take(8).toSet(), asked - index - ownerRelay)
+        }
+
+    @Test
+    fun theOwnRelayPhaseHasADeadline() =
+        runTest {
+            // 40 owners, each on a relay of their own that never answers: 5 waves of 8, each held to
+            // the read deadline, would take minutes. The phase ends at its own deadline.
+            val owners = List(40) { newSigner() }
+            val silent = HashSet<NormalizedRelayUrl>()
+            for ((i, who) in owners.withIndex()) {
+                val r = relay("wss://silent$i.example")
+                silent += r
+                relays.put(index, who.signed(10002, arrayOf(arrayOf("r", r.url, "write")), createdAt = 1))
+            }
+            val hanging =
+                object : RelayAccess {
+                    override suspend fun fetch(
+                        relays: Set<NormalizedRelayUrl>,
+                        filter: Filter,
+                    ): RelayRead =
+                        if (relays.any { it in silent }) awaitCancellation() else this@RunnerBoundsTest.relays.fetch(relays, filter)
+                }
+            val nostr = RunnerNostr(hanging, setOf(index), null, now = { clock }, ownRelaysDeadlineMs = 60_000)
+            val started = testScheduler.currentTime
+            nostr.schedules(owners.map { it.pubKey })
+            assertTrue(testScheduler.currentTime - started <= 61_000, "took ${testScheduler.currentTime - started} ms")
+        }
 }

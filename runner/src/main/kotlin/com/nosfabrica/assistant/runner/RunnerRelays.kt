@@ -231,6 +231,8 @@ class RunnerNostr(
     private val minChunk: Int = MIN_CHUNK,
     /** The schedules one owner is assumed to hold on one relay ([SCHEDULES_PER_OWNER]). */
     private val schedulesPerOwner: Int = SCHEDULES_PER_OWNER,
+    /** The longest the owners' own relays may take, all of them, in one [schedules] ([OWN_RELAYS_DEADLINE_MS]). */
+    private val ownRelaysDeadlineMs: Long = OWN_RELAYS_DEADLINE_MS,
 ) {
     private class CachedRelays(
         val relays: WriteRelays,
@@ -334,10 +336,14 @@ class RunnerNostr(
     private fun vetted(list: AdvertisedRelayListEvent): WriteRelays {
         val listed = list.writeRelays().orEmpty()
         if (listed.isEmpty()) return WriteRelays(emptySet(), WriteRelays.State.NONE)
+        // The first [MAX_WRITE_RELAYS], in the list's order: one owner listing hundreds would
+        // otherwise hold every poll for as long as their slowest relays take.
         val relays =
             listed
                 .filter { UrlGuard.refusal(it, setOf("wss")) == null }
                 .mapNotNull { RelayUrlNormalizer.normalizeOrNull(it) }
+                .distinct()
+                .take(MAX_WRITE_RELAYS)
                 .toSet()
         return WriteRelays(relays, if (relays.isEmpty()) WriteRelays.State.REFUSED else WriteRelays.State.LISTED)
     }
@@ -480,19 +486,21 @@ class RunnerNostr(
         val found = HashMap<HexKey, MutableList<Event>>()
         val servedBy = HashMap<HexKey, MutableSet<NormalizedRelayUrl>>()
 
+        val merging = Any()
+
         suspend fun ask(byRelay: Map<NormalizedRelayUrl, List<HexKey>>) {
-            val reads =
-                onEach(byRelay.keys) { relay ->
-                    relay to byAuthors(relay, byRelay.getValue(relay), schedulesPerOwner, ::scheduleFilter)
+            onEach(byRelay.keys) { relay ->
+                val read = byAuthors(relay, byRelay.getValue(relay), schedulesPerOwner, ::scheduleFilter)
+                // Merged as each relay ends, so a phase cut short by its deadline keeps what was read.
+                synchronized(merging) {
+                    read.events.forEach { found.getOrPut(it.pubKey) { ArrayList() } += it }
+                    read.covered.forEach { servedBy.getOrPut(it) { HashSet() } += relay }
                 }
-            // Merged here, on one coroutine: the reads ran in parallel.
-            for ((relay, read) in reads) {
-                read.events.forEach { found.getOrPut(it.pubKey) { ArrayList() } += it }
-                read.covered.forEach { servedBy.getOrPut(it) { HashSet() } += relay }
             }
         }
 
-        fun schedulesOf(owner: HexKey) = found[owner].orEmpty().filterIsInstance<ScheduledTaskEvent>().filter { it.pubKey == owner }
+        fun schedulesOf(owner: HexKey) =
+            synchronized(merging) { found[owner].orEmpty().toList() }.filterIsInstance<ScheduledTaskEvent>().filter { it.pubKey == owner }
 
         val all = owners.distinct()
         ask(index.associateWith { all })
@@ -516,10 +524,13 @@ class RunnerNostr(
                 .filter { it !in index }
                 .forEach { byRelay.getOrPut(it) { ArrayList() } += owner }
         }
-        ask(byRelay)
+        // A relay still being read at the deadline answered for nobody: its owners may lack a quorum.
+        withTimeoutOrNull(ownRelaysDeadlineMs) { ask(byRelay) }
+            ?: Log.i(TAG) { "the owners' relays ran past ${ownRelaysDeadlineMs}ms: those still reading answered for nobody" }
 
         return scheduled.flatMap { owner ->
-            val quorum = hasQuorum(ownRelays[owner] ?: WriteRelays.UNKNOWN, servedBy[owner].orEmpty())
+            val served = synchronized(merging) { servedBy[owner].orEmpty().toSet() }
+            val quorum = hasQuorum(ownRelays[owner] ?: WriteRelays.UNKNOWN, served)
             schedulesOf(owner)
                 .groupBy { it.dTag() }
                 .values
@@ -583,6 +594,16 @@ class RunnerNostr(
 
         /** An hour: a person's relays rarely move, and a stale list only costs a missed read. */
         const val RELAY_LIST_TTL_SECONDS = 3_600L
+
+        /**
+         * The longest every owner's own relays may take in one poll, all of them: past it, an owner
+         * whose relays didn't answer has no quorum. 8 relays at a time, each read held to
+         * [READ_DEADLINE_MS], would otherwise make a poll as long as its slowest wave times the waves.
+         */
+        const val OWN_RELAYS_DEADLINE_MS = 120_000L
+
+        /** The most write relays asked for one owner: the first in their list, after vetting. */
+        const val MAX_WRITE_RELAYS = 8
 
         /** How often an owner the index shows no schedule for has their own relays asked anyway. */
         const val OFF_INDEX_RECHECK_SECONDS = 3_600L
