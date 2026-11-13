@@ -72,6 +72,9 @@ enum class RunnerOutcome {
     /** A device of the owner finished it (`ran`). */
     ALREADY_DONE,
 
+    /** The task's service failed [Runner.MAX_FAILED_WAKES] wakes in a row this poll: not woken again until the next. */
+    SERVICE_UNAVAILABLE,
+
     /** The runner is stopping, or no longer holds the leader lock: no new wake. */
     STOPPING,
     ERROR,
@@ -161,6 +164,17 @@ class Runner(
     /** The occurrences a wake is under way for: a second schedule due at the same one waits its turn, then finds it woken. */
     private val waking = ConcurrentHashMap.newKeySet<WakeKey>()
 
+    /**
+     * The owners whose own relays are read on every poll, index or not: those that had a due
+     * schedule last poll (woken, failed, busy, without a quorum) or have a wake pending. An owner
+     * the index doesn't show would otherwise be read hourly, and their retry wait an hour.
+     */
+    @Volatile
+    private var pending: Set<HexKey> = emptySet()
+
+    /** Each task service's failed wakes in a row, this poll. */
+    private val failedInARow = ConcurrentHashMap<String, Int>()
+
     /** Each schedule's merged tags by event id: an event never changes, so neither does its plaintext. Never logged. */
     private val decrypted = ConcurrentHashMap<String, ScheduledTask>()
 
@@ -171,7 +185,8 @@ class Runner(
         // An owner whose Assistant is gone takes its settled occurrences with it; so does time.
         val oldest = now() - SETTLED_KEEP_SECONDS
         settled.keys.retainAll { it.owner in byOwner && it.occurrence >= oldest }
-        val reads = nostr.schedules(byOwner.keys)
+        failedInARow.clear()
+        val reads = nostr.schedules(byOwner.keys, alwaysOwnRelays = pending + nextWake.keys.map { it.owner })
         decrypted.keys.retainAll(reads.map { it.event.id }.toSet())
         val at = now()
         nextWake.values.removeIf { it <= at }
@@ -197,6 +212,7 @@ class Runner(
                         }
                     }.awaitAll()
             }
+        pending = outcomes.filter { it.second in PENDING }.mapTo(HashSet()) { it.first.owner }
         return outcomes.toMap(LinkedHashMap())
     }
 
@@ -255,12 +271,25 @@ class Runner(
         if (settled.containsKey(key)) return report(owner, RunnerOutcome.ATTEMPTED)
         nextWake[key]?.let { if (at < it) return report(owner, RunnerOutcome.WOKEN_RECENTLY) }
         if (!accepting()) return report(owner, RunnerOutcome.STOPPING)
+        // A service that failed this many in a row is down: the rest of its wakes wait for the next poll.
+        if ((failedInARow[service] ?: 0) >= MAX_FAILED_WAKES) return report(owner, RunnerOutcome.SERVICE_UNAVAILABLE)
         val answer = waker.wake(service, WakeRequest(key.task, owner, key.occurrence))
+        if (answer is WakeAnswer.Failed || (answer is WakeAnswer.Settled && answer.outcome == null)) {
+            failedInARow.merge(service, 1, Int::plus)
+        } else {
+            failedInARow.remove(service)
+        }
         // When it may be woken again: null for never, the service having settled it.
         val (outcome, again, detail) =
             when (answer) {
                 WakeAnswer.Accepted -> Triple(RunnerOutcome.WOKEN, wakeRetrySeconds, null)
-                is WakeAnswer.Settled -> Triple(RunnerOutcome.SETTLED, null, answer.outcome)
+                // A 200 whose body names no outcome isn't an answer: it settles nothing.
+                is WakeAnswer.Settled ->
+                    if (answer.outcome == null) {
+                        Triple(RunnerOutcome.WAKE_FAILED, wakeRetrySeconds, "no outcome")
+                    } else {
+                        Triple(RunnerOutcome.SETTLED, null, answer.outcome)
+                    }
                 // The service names when: honoured as given, within a day, whatever WAKE_RETRY_SECONDS says.
                 is WakeAnswer.Busy ->
                     Triple(
@@ -358,6 +387,22 @@ class Runner(
         const val PARALLELISM = 8
 
         const val DEFAULT_WAKE_RETRY_SECONDS = 600L
+
+        /** A task service's failed wakes in a row before the rest of its wakes wait for the next poll. */
+        const val MAX_FAILED_WAKES = 3
+
+        /** Outcomes that mean a schedule was due, or may be: its owner's relays are read on the next poll, index or not. */
+        private val PENDING =
+            setOf(
+                RunnerOutcome.WOKEN,
+                RunnerOutcome.BUSY,
+                RunnerOutcome.WAKE_REFUSED,
+                RunnerOutcome.WAKE_FAILED,
+                RunnerOutcome.WOKEN_RECENTLY,
+                RunnerOutcome.NO_QUORUM,
+                RunnerOutcome.SERVICE_UNAVAILABLE,
+                RunnerOutcome.STOPPING,
+            )
 
         /** How long a settled occurrence is remembered: past two days no schedule is still due at it. */
         const val SETTLED_KEEP_SECONDS = 2 * 86_400L

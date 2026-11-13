@@ -99,7 +99,13 @@ Each poll (default every 5 minutes):
 6. **Task type.** The schedule's `task` tag picks it. Unknown types are skipped.
 7. **Wake** `POST {service}/v1/run`, at most once per `(task, owner, occurrence)` every
    `WAKE_RETRY_SECONDS` (default 600), or after a `429`'s `Retry-After`, until the service answers
-   `200`. A `200 {outcome}` settles the occurrence: it is never woken again.
+   `200`. A `200 {outcome}` settles the occurrence: it is never woken again. A `200` whose body
+   names no outcome settles nothing (`WAKE_FAILED`). A wake gets 5 s to connect and 10 s in all,
+   and is cancelled with the poll; after 3 failed wakes in a row a service isn't woken again that
+   poll (`SERVICE_UNAVAILABLE`).
+8. **Retries are read every poll.** An owner with a wake pending, or whose schedule was due last
+   poll, has their own relays read on the next poll even when the index doesn't show the
+   schedule (others are read there hourly), so a retry never waits an hour.
 
 Both the last wake and the settled occurrences are kept in memory only, per `(task, owner,
 occurrence)`: two schedules of one task (06:00 and 06:15) each settle their own. A settled

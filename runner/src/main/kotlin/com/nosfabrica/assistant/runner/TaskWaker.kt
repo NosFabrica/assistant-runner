@@ -1,13 +1,16 @@
 package com.nosfabrica.assistant.runner
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
 import java.util.Date
+import kotlin.coroutines.resume
 
 /** What a task service answered a wake (PLAN.md, "The trigger contract (v1)"). */
 sealed interface WakeAnswer {
@@ -44,7 +47,8 @@ fun interface TaskWaker {
 /**
  * [TaskWaker] over HTTP: `POST {service}/v1/run`, inside the cluster, no token (a wake only makes
  * the service do what the owner's own signed schedule asks, and the service checks all of it).
- * [client] is the runner's internal one: no redirects, a call timeout.
+ * [client] is the runner's internal one ([serviceClient]): no redirects, short timeouts. The call
+ * is cancelled with the coroutine, so a stopping runner or a cancelled poll doesn't wait on it.
  */
 class HttpTaskWaker(
     private val client: OkHttpClient,
@@ -53,42 +57,67 @@ class HttpTaskWaker(
     override suspend fun wake(
         service: String,
         request: WakeRequest,
-    ): WakeAnswer =
-        withContext(Dispatchers.IO) {
-            val http =
-                Request
-                    .Builder()
-                    .url(service.trimEnd('/') + WakeRequest.PATH)
-                    .post(request.toJson().toString().toRequestBody(JSON))
-                    .build()
-            try {
-                client.newCall(http).execute().use { response ->
-                    when (response.code) {
-                        202 -> {
-                            WakeAnswer.Accepted
-                        }
-
-                        200 -> {
-                            // Bounded: an answer is a few bytes, and only an enum name from it is ever logged.
-                            val body = response.body.byteStream().use { it.readNBytes(MAX_ANSWER_BYTES) }
-                            WakeAnswer.Settled(SettledAnswer.outcomeOf(body.decodeToString()))
-                        }
-
-                        429 -> {
-                            WakeAnswer.Busy(retryAfter(response.header("Retry-After"), response.headers.getDate("Retry-After")))
-                        }
-
-                        400 -> {
-                            WakeAnswer.Malformed
-                        }
-
-                        else -> {
-                            WakeAnswer.Failed("http ${response.code}")
-                        }
+    ): WakeAnswer {
+        val http =
+            Request
+                .Builder()
+                .url(service.trimEnd('/') + WakeRequest.PATH)
+                .post(request.toJson().toString().toRequestBody(JSON))
+                .build()
+        val call = client.newCall(http)
+        return suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(
+                object : Callback {
+                    override fun onFailure(
+                        call: Call,
+                        e: IOException,
+                    ) {
+                        cont.resume(WakeAnswer.Failed(e.javaClass.simpleName))
                     }
+
+                    override fun onResponse(
+                        call: Call,
+                        response: Response,
+                    ) {
+                        // Read here, on OkHttp's thread: the body is a few bytes at most.
+                        val answer =
+                            try {
+                                answerOf(response)
+                            } catch (e: IOException) {
+                                WakeAnswer.Failed(e.javaClass.simpleName)
+                            }
+                        cont.resume(answer)
+                    }
+                },
+            )
+        }
+    }
+
+    private fun answerOf(response: Response): WakeAnswer =
+        response.use {
+            when (response.code) {
+                202 -> {
+                    WakeAnswer.Accepted
                 }
-            } catch (e: IOException) {
-                WakeAnswer.Failed(e.javaClass.simpleName)
+
+                200 -> {
+                    // Bounded: an answer is a few bytes, and only an enum name from it is ever logged.
+                    val body = response.body.byteStream().use { it.readNBytes(MAX_ANSWER_BYTES) }
+                    WakeAnswer.Settled(SettledAnswer.outcomeOf(body.decodeToString()))
+                }
+
+                429 -> {
+                    WakeAnswer.Busy(retryAfter(response.header("Retry-After"), response.headers.getDate("Retry-After")))
+                }
+
+                400 -> {
+                    WakeAnswer.Malformed
+                }
+
+                else -> {
+                    WakeAnswer.Failed("http ${response.code}")
+                }
             }
         }
 

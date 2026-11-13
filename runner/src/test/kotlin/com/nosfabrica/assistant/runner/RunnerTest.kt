@@ -286,6 +286,57 @@ class RunnerTest : RunnerWorld() {
         }
 
     @Test
+    fun aSettledAnswerThatIsntOneIsAFailedWake() =
+        runTest {
+            world()
+            schedule()
+            // A 200 whose body names no outcome: not an answer, so it settles nothing.
+            waker.answer = { WakeAnswer.Settled(null) }
+            assertEquals(RunnerOutcome.WAKE_FAILED, runner.poll()[mine])
+            clock += 600
+            waker.answer = { WakeAnswer.Accepted }
+            assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
+        }
+
+    @Test
+    fun aServiceThatFailsThreeWakesInARowIsNotWokenAgainThisPoll() =
+        runTest {
+            world()
+            schedule()
+            // Five more owners, all due: the service is down.
+            val more = List(5) { newSigner() to newSigner() }
+            val dir = FakeDirectory(directory.assistants + more.associate { (o, a) -> o.pubKey to a })
+            for ((o, a) in more) {
+                relays.put(index, o.signed(10002, arrayOf(arrayOf("r", ownerRelay.url, "write")), createdAt = 1))
+                schedule(task(runner = a), by = o)
+            }
+            waker.answer = { WakeAnswer.Failed("http 503") }
+            val r =
+                Runner(dir, RunnerNostr(relays, setOf(index), null, now = { clock }), waker, services, now = { clock }, parallelism = 1)
+            val outcomes = r.poll()
+            assertEquals(3, waker.wakes.size)
+            assertEquals(3, outcomes.values.count { it == RunnerOutcome.SERVICE_UNAVAILABLE })
+            // The next poll tries again.
+            clock += 600
+            waker.answer = { WakeAnswer.Accepted }
+            assertEquals(6, r.poll().values.count { it == RunnerOutcome.WOKEN })
+        }
+
+    @Test
+    fun anOwnerOffTheIndexWithAWakePendingIsReadEveryPoll() =
+        runTest {
+            world()
+            // The index doesn't mirror this schedule: it is read on the owner's relays, hourly at most.
+            schedule(onIndex = false)
+            waker.answer = { WakeAnswer.Failed("http 503") }
+            assertEquals(RunnerOutcome.WAKE_FAILED, runner.poll()[mine])
+            // Ten minutes on, its retry is due: the owner's relays are read again, not an hour later.
+            clock += 600
+            waker.answer = { WakeAnswer.Accepted }
+            assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
+        }
+
+    @Test
     fun aKeyThatCantBeHadIsReportedAndTheScheduleIsDecryptedOncePerVersion() =
         runTest {
             world()

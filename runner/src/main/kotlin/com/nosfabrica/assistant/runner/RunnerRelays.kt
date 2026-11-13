@@ -477,11 +477,15 @@ class RunnerNostr(
      * that the newest names exactly this owner's Assistant.
      *
      * The index relays are asked first, for every owner; only the owners with a schedule there
-     * (and, hourly, those without: [OFF_INDEX_RECHECK_SECONDS]) have their own write relays asked
-     * too. Every relay is asked on its own, [relayParallelism] at a time ([byAuthors]), so one
+     * (and, hourly, those without: [OFF_INDEX_RECHECK_SECONDS]; on every poll, [alwaysOwnRelays])
+     * have their own write relays asked too. Every relay is asked on its own, [relayParallelism] at a time ([byAuthors]), so one
      * slow relay costs its own deadline, not the sum of everyone's.
      */
-    suspend fun schedules(owners: Collection<HexKey>): List<ScheduleRead> {
+    suspend fun schedules(
+        owners: Collection<HexKey>,
+        /** Owners whose own relays are read whatever the index shows (a wake pending for them). */
+        alwaysOwnRelays: Set<HexKey> = emptySet(),
+    ): List<ScheduleRead> {
         if (owners.isEmpty()) return emptyList()
         val found = HashMap<HexKey, MutableList<Event>>()
         val servedBy = HashMap<HexKey, MutableSet<NormalizedRelayUrl>>()
@@ -510,6 +514,7 @@ class RunnerNostr(
         val scheduled =
             all.filter { owner ->
                 schedulesOf(owner).isNotEmpty() ||
+                    owner in alwaysOwnRelays ||
                     (offIndexCheckedAt[owner]?.let { at - it >= OFF_INDEX_RECHECK_SECONDS } ?: true).also {
                         if (it) offIndexCheckedAt[owner] = at
                     }

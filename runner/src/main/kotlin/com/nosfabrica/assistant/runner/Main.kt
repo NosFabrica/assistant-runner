@@ -100,14 +100,7 @@ fun main() {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .build()
-    // The task services are inside the cluster: the one unguarded client, and it follows nothing.
-    val serviceClient =
-        base
-            .newBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .callTimeout(30, TimeUnit.SECONDS)
-            .build()
+    val serviceClient = serviceClient(base)
     // An owner's relays came from the owner: each socket goes through the guard and reads within a
     // budget. The index relays are Brainstorm's own and aren't held to the budget.
     val guardedSockets = guardedClient(base, setOf("wss"))
@@ -175,6 +168,20 @@ fun main() {
     if (end == LoopEnd.LEADERSHIP_LOST) exitProcess(4)
     if (end == null) exitProcess(5)
 }
+
+/**
+ * The client for the task services, inside the cluster: the one unguarded client, and it follows
+ * nothing. A wake's answer is immediate (a `202` only queues the run), so 5 s to connect and 10 s
+ * for the whole call are plenty, and a hung service costs a poll that much at most.
+ */
+fun serviceClient(base: OkHttpClient): OkHttpClient =
+    base
+        .newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
+        .build()
 
 /** How long SIGTERM waits for the loop to notice, and then again after cancelling it. */
 private const val STOP_GRACE_SECONDS = 10L

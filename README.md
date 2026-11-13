@@ -63,6 +63,11 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    wake it once). A restart forgets what was settled, which costs at most one wake per due
    occurrence, answered as settled.
 
+   A wake gets 5 s to connect and 10 s in all, and is cancelled with the poll. A `200` whose body
+   names no outcome settles nothing (`WAKE_FAILED`). After 3 failed wakes in a row a service
+   isn't woken again that poll (`SERVICE_UNAVAILABLE`). An owner with a wake pending, or a due
+   schedule last poll, has their own relays read every poll, index or not.
+
 The runner writes nothing, to Postgres or anywhere else.
 
 Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debug.
