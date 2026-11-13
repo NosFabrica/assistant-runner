@@ -181,7 +181,7 @@ object BrainstormSchema {
                     SELECT pubkey AS owner,
                            assistant_pubkey AS assistant,
                            encrypted_nsec,
-                           CASE WHEN encrypted_nsec IS NULL THEN nsec END AS legacy_nsec
+                           CASE WHEN encrypted_nsec IS NULL OR encrypted_nsec = '' THEN nsec END AS legacy_nsec
                     FROM brainstorm_nsec
                     WHERE assistant_pubkey IS NOT NULL
                     """.trimIndent(),

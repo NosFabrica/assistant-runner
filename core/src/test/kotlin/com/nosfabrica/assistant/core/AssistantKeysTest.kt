@@ -52,7 +52,7 @@ class AssistantKeysTest {
             ): Pair<String, Person> {
                 val o = Person().pubkey
                 BrainstormSchema.insert(db, o, if (withAssistant) assistant.pubkey else null, nsec, encrypted)
-                secrets += listOf(assistant.nsec, assistant.privHex, nsec) + listOfNotNull(encrypted)
+                secrets += (listOf(assistant.nsec, assistant.privHex, nsec) + listOfNotNull(encrypted)).filter { it.isNotEmpty() }
                 return o to assistant
             }
 
@@ -62,6 +62,8 @@ class AssistantKeysTest {
             // brainstorm_nsec.nsec still holds a plaintext beside the token; the token wins, as on the server.
             val stalePlaintext = Person().let { a -> owner(a, nsec = Person().nsec, encrypted = encrypt(a.nsec)) }
             val neverEncrypted = Person().let { a -> owner(a, encrypted = a.nsec) }
+            // The server's `if encrypted_nsec:` reads an empty token as none and falls back to `nsec`.
+            val emptyToken = owner(encrypted = "")
             val unreadable = Person().let { a -> owner(a, encrypted = encrypt(a.nsec, lostKey)) }
             val notAnNsec = Person().let { a -> owner(a, encrypted = encrypt("hello")) }
             val mismatch = Person().let { a -> owner(a, encrypted = encrypt(Person().nsec)) }
@@ -70,16 +72,26 @@ class AssistantKeysTest {
 
             val (results, logs) =
                 capturingLogs {
-                    listOf(encrypted, legacy, hexLegacy, stalePlaintext, neverEncrypted, unreadable, notAnNsec, mismatch, noAssistant)
-                        .map { (o, _) -> keys.key(o) }
+                    listOf(
+                        encrypted,
+                        legacy,
+                        hexLegacy,
+                        stalePlaintext,
+                        neverEncrypted,
+                        emptyToken,
+                        unreadable,
+                        notAnNsec,
+                        mismatch,
+                        noAssistant,
+                    ).map { (o, _) -> keys.key(o) }
                 }
-            results.take(5).zip(listOf(encrypted, legacy, hexLegacy, stalePlaintext, neverEncrypted)).forEach { (r, expected) ->
+            results.take(6).zip(listOf(encrypted, legacy, hexLegacy, stalePlaintext, neverEncrypted, emptyToken)).forEach { (r, expected) ->
                 val ready = assertIs<AssistantKey.Ready>(r, r.toString())
                 assertEquals(expected.second.pubkey, ready.signer.pubKey)
             }
             assertEquals(
                 listOf(KeyFailure.NSEC_UNREADABLE, KeyFailure.NSEC_UNREADABLE, KeyFailure.NSEC_MISMATCH, KeyFailure.NO_ASSISTANT),
-                results.drop(5).map { assertIs<AssistantKey.Failed>(it).failure },
+                results.drop(6).map { assertIs<AssistantKey.Failed>(it).failure },
             )
             assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(keys.key(Person().pubkey)).failure)
             for (secret in secrets) assertFalse(secret in logs, "logged a secret")

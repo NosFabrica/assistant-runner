@@ -94,11 +94,12 @@ The service is idempotent per owner: a wake for an owner already printing joins 
   SELECT pubkey AS owner,
          assistant_pubkey AS assistant,
          encrypted_nsec,
-         CASE WHEN encrypted_nsec IS NULL THEN nsec END AS legacy_nsec
+         CASE WHEN encrypted_nsec IS NULL OR encrypted_nsec = '' THEN nsec END AS legacy_nsec
   FROM brainstorm_nsec
   WHERE assistant_pubkey IS NOT NULL;
   ```
-  - `legacy_nsec` mirrors the server's own fallback (`_plaintext_nsec`) for rows not yet encrypted.
+  - `legacy_nsec` mirrors the server's own fallback (`_plaintext_nsec`, whose `if encrypted_nsec:`
+    also reads an empty string as none) for rows not yet encrypted.
   - `brainstorm_nsec.nsec` is `NOT NULL` and still holds the plaintext even beside an
     `encrypted_nsec`. That is the server's to drop, so the view exposes it only where there is
     nothing else.

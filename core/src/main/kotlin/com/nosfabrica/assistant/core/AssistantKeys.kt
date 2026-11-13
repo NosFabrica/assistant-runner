@@ -155,7 +155,8 @@ class AssistantKeys(
     /** The nsec's text, or null when nothing opens it. */
     private fun plaintextOf(row: Row): String? {
         val token = row.encrypted
-        if (token == null) return row.legacy
+        // The server's `if encrypted_nsec:` reads an empty token as none too.
+        if (token.isNullOrEmpty()) return row.legacy
         // The server's decrypt_nsec: a value that was never encrypted is used as it is.
         if (token.startsWith("nsec1")) return token
         val bytes = keyFile.decrypt(token) ?: return null
