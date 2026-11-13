@@ -32,10 +32,14 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    assistant_pubkey ~ '^[0-9a-f]{64}$' ORDER BY pubkey`, 500 at a time. Nothing is decrypted. A row
    the server wrote wrong is left out by the query itself, so it never ends the paging early.
 2. Reads every kind 34817 by those owners (by author, never `#p` or `#d`): the index relays first,
-   then each owner's NIP-65 write relays, with the worker's quorum rules (a full page counts as
-   unanswered; each relay gets 20 s and 2,000 events; events must verify and be dated at most 10
-   minutes ahead). It keeps the newest version of each `d`. An owner's relay is asked through the
-   SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
+   then each owner's NIP-65 write relays, with the worker's quorum rules (each relay is asked in
+   chunks of 500 owners, a page at most 500 events; a full page, or one the event cap cut off, is
+   paged on with `until` and deduplicated by id, so a relay answers for a chunk only on a page that
+   isn't full; a CLOSED chunk is asked again in halves, never one owner twice, and not at all after
+   `rate-limited:` or `blocked:`; at most 64 REQs a relay per 500 owners; each relay gets 20 s and
+   2,000 events a read, never fewer than the `limit`; events must verify and be dated at most 10
+   minutes ahead, checked before copies are deduplicated). It keeps the newest version of each
+   `d`. An owner's relay is asked through the SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
    (`permessage-deflate` is not offered, and a relay that compresses anyway is dropped: OkHttp
    inflates a whole message in memory, past any byte count). At most 8 relays are read at once,
    so owners' relays can make one poll hold about 96 MB of frames at worst: give the container a

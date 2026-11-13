@@ -76,8 +76,12 @@ Each poll (default every 5 minutes):
    - the quorum is more than half the owner's write relays. The index relays stand in only when
      an index relay answered for the owner in full and holds no list: an unread list (CLOSED, a
      timeout, a cap) or one whose every relay is refused is `NO_QUORUM`, never the index alone;
-   - a full page counts as unanswered;
-   - every relay gets 20 s and 2,000 events;
+   - a full page (judged on what the relay sent, before any check), or one the event cap cut
+     off, is paged on with `until`, copies deduplicated by id; a relay answers for a chunk of owners
+     only on a page that isn't full. A CLOSED chunk is asked again in halves, never one owner twice,
+     and nothing more after `rate-limited:` or `blocked:`. At most 64 REQs a relay per 500 owners,
+     which covers 500 owners with six schedules each on a relay that cuts at 100;
+   - every relay gets 20 s and 2,000 events a read (never fewer than its `limit`, at most 500);
    - events must verify, and be dated at most 10 minutes ahead;
    - an owner's relay socket reads at most 4 MB per 10 s, uncompressed: `permessage-deflate` is
      never offered, and a relay that compresses anyway is dropped (OkHttp would inflate a whole

@@ -40,6 +40,15 @@ class FakeRelays : RelayAccess {
     /** Relays that answer a filter with a CLOSED instead (a REQ too large for them, say). */
     var refuses: (NormalizedRelayUrl, Filter) -> Boolean = { _, _ -> false }
 
+    /** The CLOSED's message, for [refuses]: `rate-limited:` and `blocked:` mean "don't ask again". */
+    var refusal: String = "error: too many authors"
+
+    /** The most a relay sends for any filter, whatever its `limit` says, and says nothing about. */
+    var maxLimit: (NormalizedRelayUrl) -> Int? = { null }
+
+    /** Where the read's event cap cuts a relay off ([QuartzRelayAccess]'s): it sent more, and neither served nor refused. */
+    var cap: (NormalizedRelayUrl) -> Int? = { null }
+
     fun put(
         relay: NormalizedRelayUrl,
         vararg events: Event,
@@ -54,16 +63,25 @@ class FakeRelays : RelayAccess {
         synchronized(asked) { asked += relays to filter }
         val up = relays - down
         val refused = up.filter { refuses(it, filter) }.toSet()
-        val answering = up - refused
+        val capped = HashSet<NormalizedRelayUrl>()
         val events =
-            answering.flatMap { relay ->
+            (up - refused).flatMap { relay ->
                 val matching =
                     synchronized(
                         held,
                     ) { held[relay].orEmpty().toList() }.filter { filter.match(it) }.sortedByDescending { it.createdAt }
-                (filter.limit ?: defaultLimit(relay))?.let { matching.take(it) } ?: matching
+                val limits = listOfNotNull(filter.limit ?: defaultLimit(relay), maxLimit(relay))
+                val page = limits.minOrNull()?.let { matching.take(it) } ?: matching
+                val cut = cap(relay)
+                if (cut != null && page.size > cut) {
+                    capped += relay
+                    page.take(cut)
+                } else {
+                    page
+                }
             }
-        return RelayRead(events.distinctBy { it.id }, answering, refused)
+        val throttled = if (RelayRead.isFinalRefusal(refusal)) refused else emptySet()
+        return RelayRead(events, up - refused - capped, refused, capped = capped, throttled = throttled, sent = events.size)
     }
 }
 
