@@ -51,6 +51,9 @@ invocation at a time**, `--max-workers=2`, and stop the daemons when done.
 - **Postgres** is plain JDBC (`org.postgresql:postgresql`), every call on `Dispatchers.IO`, one
   connection per operation (no pool: a poll every five minutes makes a handful of calls). The
   runner only reads, and holds its advisory lock: its role has a column grant and no schema.
+  Every connection is bounded (`Db`: connect, login, socket and statement timeouts); keep any new
+  call under them. The lock is a session lock, so `DATABASE_URL` must be a direct, session-mode
+  connection to the primary, never a transaction-mode pooler or a standby.
 - **Quartz** comes from JitPack pinned by a full commit hash (`gradle/libs.versions.toml`).
   Hashes carry no order, so every module `force()`s the pin; the only relation between two
   hashes is `git merge-base --is-ancestor`. Quartz is KMP with Android in its graph, so
