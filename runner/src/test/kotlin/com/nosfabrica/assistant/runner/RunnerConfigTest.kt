@@ -28,6 +28,14 @@ class RunnerConfigTest {
         assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("TASK_URL_OBSERVER" to "observer:8080")) }
         assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("POLL_SECONDS" to "5")) }
         assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("WAKE_RETRY_SECONDS" to "soon")) }
+        // Every index relay must be a wss relay, and there must be one.
+        assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("INDEX_RELAYS" to "wss://a.example,ws://b.example")) }
+        assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("INDEX_RELAYS" to "wss://a.example,not a relay")) }
+        assertFailsWith<IllegalArgumentException> { RunnerConfig.fromEnv(base + ("INDEX_RELAYS" to " , ")) }
+        assertEquals(
+            listOf("wss://a.example", "wss://b.example"),
+            RunnerConfig.fromEnv(base + ("INDEX_RELAYS" to "wss://a.example, wss://b.example")).indexRelays,
+        )
     }
 
     @Test

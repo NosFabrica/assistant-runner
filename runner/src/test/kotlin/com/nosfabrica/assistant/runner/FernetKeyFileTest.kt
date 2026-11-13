@@ -67,4 +67,18 @@ class FernetKeyFileTest {
             assertNotNull(opened)
             for (secret in listOf(notAKey, k1, tokenK1)) assertFalse(secret in logs, logs)
         }
+
+    @Test
+    fun manyTokensNoKeyOpensReadTheFileAgainAtMostOncePerSecond() {
+        Files.writeString(path, k1)
+        var at = 0L
+        val file = FernetKeyFile(path, nowMs = { at })
+        file.decrypt(tokenK1)
+        val before = file.reads
+        repeat(50) { assertNull(file.decrypt(tokenK2)) }
+        assertEquals(before + 1, file.reads)
+        at += 1_001
+        assertNull(file.decrypt(tokenK2))
+        assertEquals(before + 2, file.reads)
+    }
 }

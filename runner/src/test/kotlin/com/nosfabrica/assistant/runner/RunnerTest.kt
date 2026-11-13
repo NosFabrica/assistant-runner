@@ -389,4 +389,38 @@ class RunnerTest : RunnerWorld() {
             for (secret in secrets) assertFalse(secret in logs, "logged a secret")
             assertTrue("owner=${owner.pubKey}" in logs)
         }
+
+    @Test
+    fun theKeysAPollNeedsAreReadInOneBatchAndWipedAfter() =
+        runTest {
+            world()
+            schedule()
+            schedule(task(runner = strangersAssistant), by = stranger)
+            runner.poll()
+            assertEquals(1, directory.batches)
+            assertEquals(setOf(owner.pubKey, stranger.pubKey), directory.keysAsked.toSet())
+            // Every private key it was handed is zeroed once the poll is done with it.
+            assertTrue(directory.handedOut.isNotEmpty())
+            assertTrue(directory.handedOut.all { s -> s.keyPair.privKey!!.all { it == 0.toByte() } })
+            // Nothing new to decrypt: no batch at all.
+            clock += 600
+            runner.poll()
+            assertEquals(1, directory.batches)
+        }
+
+    @Test
+    fun aScheduleThatWontDecryptIsNotTriedAgain() =
+        runTest {
+            world()
+            val private = PrivateTagsInContent.encode(task().privateTags)
+            val tags = arrayOf(arrayOf("d", "observer"), arrayOf("p", assistant.pubKey))
+            val event = owner.signed(ScheduledTaskEvent.KIND, tags, owner.nip44Encrypt(private, owner.pubKey), createdAt = now - 60)
+            relays.put(ownerRelay, event)
+            relays.put(index, event)
+            assertEquals(RunnerOutcome.UNREADABLE, runner.poll()[mine])
+            val asked = directory.keysAsked.size
+            clock += 600
+            assertEquals(RunnerOutcome.UNREADABLE, runner.poll()[mine])
+            assertEquals(asked, directory.keysAsked.size)
+        }
 }

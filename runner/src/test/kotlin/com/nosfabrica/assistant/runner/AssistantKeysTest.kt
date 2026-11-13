@@ -5,6 +5,7 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip19Bech32.toNsec
 import kotlinx.coroutines.test.runTest
 import java.nio.file.Files
+import java.nio.file.attribute.FileTime
 import java.security.SecureRandom
 import java.sql.SQLException
 import java.util.Base64
@@ -161,5 +162,50 @@ class AssistantKeysTest {
             val keys = AssistantKeys(db, keyFile)
             assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(keys.key(owner)).failure)
             assertEquals(emptyList(), keys.pairs())
+        }
+
+    @Test
+    fun aBlankAssistantIsNoAssistant() =
+        runTest {
+            val db = world()
+            val a = Person()
+            val owner = Person().pubkey
+            BrainstormSchema.insert(db, owner, "", a.nsec, encrypt(a.nsec))
+            assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(AssistantKeys(db, keyFile).key(owner)).failure)
+        }
+
+    @Test
+    fun manyOwnersKeysAreReadInOneQueryAndAgreeWithOneByOne() =
+        runTest {
+            val db = world()
+            val people = List(5) { Person() to Person() }
+            people.forEach { (o, a) -> BrainstormSchema.insert(db, o.pubkey, a.pubkey, a.nsec, encrypt(a.nsec)) }
+            val lost = Person() to Person()
+            BrainstormSchema.insert(db, lost.first.pubkey, lost.second.pubkey, "x", encrypt(lost.second.nsec, lostKey))
+            val absent = Person().pubkey
+            val keys = AssistantKeys(db, keyFile)
+            val owners = people.map { it.first.pubkey } + lost.first.pubkey + absent
+            val batch = keys.keys(owners)
+            assertEquals(owners.toSet(), batch.keys)
+            for ((o, a) in people) assertEquals(a.pubkey, assertIs<AssistantKey.Ready>(batch[o.pubkey]).signer.pubKey)
+            assertEquals(KeyFailure.NSEC_UNREADABLE, assertIs<AssistantKey.Failed>(batch[lost.first.pubkey]).failure)
+            assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(batch[absent]).failure)
+        }
+
+    @Test
+    fun aKeyThatWontOpenIsNotReadAgainUntilTheKeyFileChanges() =
+        runTest {
+            val db = world()
+            val a = Person()
+            val owner = Person().pubkey
+            BrainstormSchema.insert(db, owner, a.pubkey, "x", encrypt(a.nsec, lostKey))
+            val keys = AssistantKeys(db, keyFile)
+            assertEquals(KeyFailure.NSEC_UNREADABLE, assertIs<AssistantKey.Failed>(keys.keys(listOf(owner))[owner]).failure)
+            // The row goes; the failure is remembered, with no query, while the key file is the same.
+            db.connect().use { c -> c.createStatement().use { it.execute("DELETE FROM brainstorm_nsec") } }
+            assertEquals(KeyFailure.NSEC_UNREADABLE, assertIs<AssistantKey.Failed>(keys.keys(listOf(owner))[owner]).failure)
+            // A rotation (the file's time changes) is a new chance.
+            Files.setLastModifiedTime(keyFile.path, FileTime.fromMillis(System.currentTimeMillis() + 10_000))
+            assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(keys.keys(listOf(owner))[owner]).failure)
         }
 }

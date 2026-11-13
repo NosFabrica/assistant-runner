@@ -52,7 +52,9 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    timeout, a cap) is `NO_QUORUM`, and so is a list whose every write relay is refused (`ws`, an
    internal host).
 4. Decrypts the private tags with the Assistant's key, the owner as NIP-44 peer
-   (`ScheduledTaskEvent.task`). The plaintext stays in memory by event id.
+   (`ScheduledTaskEvent.task`). The plaintext stays in memory by event id. The keys a poll needs
+   are read in one query and zeroed after the poll; a key that won't open is not read again until
+   the key file changes (or an hour), and a version that won't decrypt is never tried again.
 5. The `task` tag picks the service (`TASK_URL_<TASK>`); others are `UNKNOWN_TASK`.
 6. Decides with `ScheduledTaskClaims.decideAsRunner`; "already started here" is the service's own
    `200 {outcome}` for (task, owner, occurrence), kept in memory.
@@ -78,8 +80,8 @@ Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debu
 |---|---|---|
 | `DATABASE_URL` | (required) | JDBC URL of brainstorm_server's Postgres, e.g. `jdbc:postgresql://postgres:5432/brainstorm`: **the primary, directly** (below). Don't set `options`, `socketTimeout` or `loginTimeout` in it: the URL's would replace the runner's |
 | `DATABASE_USER`, `DATABASE_PASSWORD` | | the `assistant_runner` role (below). A secret: from a k8s Secret |
-| `NSEC_KEYS_FILE` | `/run/secrets/nsec_encryption_keys` | the Fernet key file brainstorm_server writes, mounted read-only |
-| `INDEX_RELAYS` | `wss://search.brainstorm.world` | comma-separated. The search relay is asked with `include:spam` |
+| `NSEC_KEYS_FILE` | `/run/secrets/nsec_encryption_keys` | the Fernet key file brainstorm_server writes, mounted read-only. A file with no key is logged as a warning at startup |
+| `INDEX_RELAYS` | `wss://search.brainstorm.world` | comma-separated `wss://` relays, at least one: anything else stops it at startup (status 2). The search relay is asked with `include:spam` |
 | `TASK_URL_<TASK>` | (at least one) | a task service's base URL, e.g. `TASK_URL_OBSERVER=http://observer:8080` |
 | `POLL_SECONDS` | `300` | at least 30 |
 | `WAKE_RETRY_SECONDS` | `600` | at least 60 |

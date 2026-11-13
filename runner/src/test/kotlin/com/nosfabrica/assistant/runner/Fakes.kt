@@ -105,10 +105,25 @@ class FakeDirectory(
             .take(limit)
             .map { AssistantPair(it.key, it.value.pubKey) }
 
+    /** How many times keys were read, one batch per call. */
+    var batches = 0
+
+    /** Every key handed out: each a copy, as the database's would be, so the runner may wipe it. */
+    val handedOut = mutableListOf<NostrSignerInternal>()
+
     override suspend fun key(owner: HexKey): AssistantKey {
         synchronized(keysAsked) { keysAsked += owner }
         failures[owner]?.let { return AssistantKey.Failed(owner, it) }
-        return assistants[owner]?.let { AssistantKey.Ready(owner, it) } ?: AssistantKey.Failed(owner, KeyFailure.NO_ASSISTANT)
+        val signer =
+            assistants[owner]?.let { NostrSignerInternal(KeyPair(it.keyPair.privKey!!.copyOf())) }
+                ?: return AssistantKey.Failed(owner, KeyFailure.NO_ASSISTANT)
+        synchronized(handedOut) { handedOut += signer }
+        return AssistantKey.Ready(owner, signer)
+    }
+
+    override suspend fun keys(owners: Collection<HexKey>): Map<HexKey, AssistantKey> {
+        batches++
+        return owners.distinct().associateWith { key(it) }
     }
 }
 

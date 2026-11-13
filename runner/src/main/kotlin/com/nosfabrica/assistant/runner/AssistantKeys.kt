@@ -7,7 +7,9 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip19Bech32.decodePrivateKeyAsHexOrNull
 import com.vitorpamplona.quartz.utils.Hex
 import com.vitorpamplona.quartz.utils.Log
+import java.nio.file.attribute.FileTime
 import java.sql.Connection
+import java.util.concurrent.ConcurrentHashMap
 
 /** An owner and the Assistant brainstorm_server holds for them, as its table lists them: nothing decrypted. */
 data class AssistantPair(
@@ -67,6 +69,9 @@ interface AssistantDirectory {
     /** [owner]'s Assistant key, decrypted now; held by the caller in memory only. */
     suspend fun key(owner: HexKey): AssistantKey
 
+    /** Each of [owners]' keys, as [key] gives them: a poll asks once for every owner it decrypts for. */
+    suspend fun keys(owners: Collection<HexKey>): Map<HexKey, AssistantKey> = owners.distinct().associateWith { key(it) }
+
     companion object {
         const val PAGE = 500
     }
@@ -92,6 +97,7 @@ class AssistantKeys(
     private val db: Db,
     private val keyFile: FernetKeyFile,
     private val table: String = TABLE,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) : AssistantDirectory {
     init {
         require(TABLE_NAME.matches(table)) { "not a table name" }
@@ -128,14 +134,63 @@ class AssistantKeys(
             }
         }
 
-    override suspend fun key(owner: HexKey): AssistantKey {
-        val row = db.use { c -> row(c, owner) } ?: return failed(owner, KeyFailure.NO_ASSISTANT)
-        val assistant = row.assistant ?: return failed(owner, KeyFailure.NO_ASSISTANT)
+    override suspend fun key(owner: HexKey): AssistantKey = keys(listOf(owner)).getValue(owner)
+
+    /**
+     * Each of [owners]' keys, their rows read in one query on one connection. A key that didn't
+     * open (`NSEC_UNREADABLE`, `NSEC_MISMATCH`) is remembered, and neither read nor tried again,
+     * while the key file's modification time is the same and for at most [FAILURE_TTL_MS]: a
+     * rotation, or an hour, is a new chance.
+     */
+    override suspend fun keys(owners: Collection<HexKey>): Map<HexKey, AssistantKey> {
+        val wanted = owners.distinct()
+        val out = HashMap<HexKey, AssistantKey>()
+        val version = keyFile.version()
+        val at = nowMs()
+        val toRead =
+            wanted.filter { owner ->
+                val known = failures[owner]?.takeIf { it.version == version && at - it.at < FAILURE_TTL_MS }
+                if (known != null) out[owner] = AssistantKey.Failed(owner, known.failure)
+                known == null
+            }
+        if (toRead.isEmpty()) return out
+        val rows = db.use { c -> rows(c, toRead) }
+        for (owner in toRead) {
+            val key = open(owner, rows[owner])
+            out[owner] = key
+            if (key is AssistantKey.Failed && key.failure != KeyFailure.NO_ASSISTANT) {
+                failures[owner] = KnownFailure(key.failure, version, at)
+            } else {
+                failures.remove(owner)
+            }
+        }
+        failures.entries.removeIf { at - it.value.at >= FAILURE_TTL_MS }
+        return out
+    }
+
+    private fun open(
+        owner: HexKey,
+        row: Row?,
+    ): AssistantKey {
+        if (row == null) return failed(owner, KeyFailure.NO_ASSISTANT)
+        // The server's `if assistant_pubkey:`: a blank one is no Assistant, not a mismatch.
+        val assistant = row.assistant?.takeIf { it.isNotBlank() } ?: return failed(owner, KeyFailure.NO_ASSISTANT)
         val hex = plaintextOf(row)?.let { decodePrivateKeyAsHexOrNull(it.trim()) }?.takeIf { it.length == 64 }
         val keyPair = hex?.let(::keyPairOrNull) ?: return failed(owner, KeyFailure.NSEC_UNREADABLE)
-        if (keyPair.pubKey.toHexKey() != assistant.lowercase()) return failed(owner, KeyFailure.NSEC_MISMATCH)
+        if (keyPair.pubKey.toHexKey() != assistant.lowercase()) {
+            keyPair.privKey?.fill(0)
+            return failed(owner, KeyFailure.NSEC_MISMATCH)
+        }
         return AssistantKey.Ready(owner, NostrSignerInternal(keyPair))
     }
+
+    private class KnownFailure(
+        val failure: KeyFailure,
+        val version: FileTime?,
+        val at: Long,
+    )
+
+    private val failures = ConcurrentHashMap<HexKey, KnownFailure>()
 
     private fun failed(
         owner: HexKey,
@@ -145,20 +200,22 @@ class AssistantKeys(
         return AssistantKey.Failed(owner, failure)
     }
 
-    /** One owner's row. Strings can't be wiped, so it lives only as long as [key] runs. */
+    /** One owner's row. Strings can't be wiped, so it lives only as long as [keys] runs. */
     private class Row(
         val assistant: String?,
         val encrypted: String?,
         val nsec: String?,
     )
 
-    private fun row(
+    private fun rows(
         c: Connection,
-        owner: HexKey,
-    ): Row? =
-        c.prepareStatement("SELECT assistant_pubkey, encrypted_nsec, nsec FROM $table WHERE pubkey = ?").use { st ->
-            st.setString(1, owner)
-            st.executeQuery().use { rs -> if (rs.next()) Row(rs.getString(1), rs.getString(2), rs.getString(3)) else null }
+        owners: List<HexKey>,
+    ): Map<HexKey, Row> =
+        c.prepareStatement("SELECT pubkey, assistant_pubkey, encrypted_nsec, nsec FROM $table WHERE pubkey = ANY(?)").use { st ->
+            st.setArray(1, c.createArrayOf("varchar", owners.toTypedArray()))
+            st.executeQuery().use { rs ->
+                buildMap { while (rs.next()) put(rs.getString(1), Row(rs.getString(2), rs.getString(3), rs.getString(4))) }
+            }
         }
 
     /** The nsec's text, or null when nothing opens it: the server's `_plaintext_nsec`. */
@@ -191,6 +248,9 @@ class AssistantKeys(
 
     companion object {
         private const val TAG = "AssistantKeys"
+
+        /** The longest a key that didn't open is remembered without a rotation: a row the server fixed is read again within it. */
+        const val FAILURE_TTL_MS = 3_600_000L
 
         /** brainstorm_server's table (its `BrainstormNsec` model). */
         const val TABLE = "brainstorm_nsec"

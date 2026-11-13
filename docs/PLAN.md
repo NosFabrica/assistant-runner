@@ -148,20 +148,26 @@ the same columns the same way with its own copy.
   reads it. There is no view and no migration on the server's side: the runner reads four of its
   columns, `pubkey`, `assistant_pubkey`, `encrypted_nsec` and `nsec`, and **is coupled to them**. A
   server migration that renames or drops one breaks the runner and every task service.
-- **`AssistantKeys`** reads one row per owner it needs,
-  `SELECT assistant_pubkey, encrypted_nsec, nsec FROM brainstorm_nsec WHERE pubkey = ?`, and opens
-  it as the server's `_plaintext_nsec` does:
+- **`AssistantKeys`** reads the rows of the owners a poll decrypts for in one query,
+  `SELECT pubkey, assistant_pubkey, encrypted_nsec, nsec FROM brainstorm_nsec WHERE pubkey = ANY(?)`,
+  and opens each as the server's `_plaintext_nsec` does:
   - `encrypted_nsec` when it is non-empty, decrypted with the key file (a value that already
     starts `nsec1` is taken as it is, as `decrypt_nsec` does);
   - `nsec` only otherwise. `nsec` is `NOT NULL` and may still hold a stale plaintext beside a
     token: the token wins, and that plaintext is never used.
-  - No row, or one with no `assistant_pubkey`, is `NO_ASSISTANT`. The nsec must give the stored
-    `assistant_pubkey`, or the result is `NSEC_MISMATCH`. The key is held in memory only, and never
-    logged.
+  - No row, or one with no (or a blank) `assistant_pubkey`, is `NO_ASSISTANT`. The nsec must give
+    the stored `assistant_pubkey`, or the result is `NSEC_MISMATCH`. The key is held in memory
+    only, for the poll, and its bytes zeroed after; it is never logged.
+  - A key that doesn't open (`NSEC_UNREADABLE`, `NSEC_MISMATCH`) is remembered, unread, until the
+    key file's modification time changes, or an hour. A schedule version that doesn't decrypt
+    with its Assistant's key (`UNREADABLE`) is never tried again.
 - **The Fernet keys** are a file of comma-separated keys (`NSEC_KEYS_FILE`, default
   `/run/secrets/nsec_encryption_keys`), tried in order, as Python's `MultiFernet` does.
   - The file is re-read when its modification time changes, and once more on a token no key
-    opens (a rotation writes `[new, old]`, then re-encrypts).
+    opens (a rotation writes `[new, old]`, then re-encrypts), at most once a second. The keys it
+    replaces are zeroed.
+  - A key or token is read as Python's `urlsafe_b64decode` reads it: `+` and `/` stand for `-` and
+    `_`, and whitespace is dropped.
   - A token no key opens even then is `NSEC_UNREADABLE` for that owner. It is never fatal to the
     poll.
 - **Fernet** (version `0x80`, AES-128-CBC, HMAC-SHA256, URL-safe base64) is implemented with
@@ -191,7 +197,7 @@ of its own, with the same column grant and whatever its own state needs (the Obs
 | `DATABASE_URL` | JDBC URL of brainstorm_server's Postgres |
 | `DATABASE_USER`, `DATABASE_PASSWORD` | the `assistant_runner` role |
 | `NSEC_KEYS_FILE` | the Fernet key file (default `/run/secrets/nsec_encryption_keys`) |
-| `INDEX_RELAYS` | comma-separated; default `wss://search.brainstorm.world` |
+| `INDEX_RELAYS` | comma-separated `wss://` relays, at least one (else it won't start); default `wss://search.brainstorm.world` |
 | `TASK_URL_<TASK>` | a task service's base URL, e.g. `TASK_URL_OBSERVER=http://observer:8080` |
 | `POLL_SECONDS` | default 300 |
 | `WAKE_RETRY_SECONDS` | default 600 |

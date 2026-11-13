@@ -175,6 +175,9 @@ class Runner(
     /** Each task service's failed wakes in a row, this poll. */
     private val failedInARow = ConcurrentHashMap<String, Int>()
 
+    /** The versions (event id) that didn't decrypt with an Assistant's key (its pubkey): one never will. */
+    private val unreadable = ConcurrentHashMap.newKeySet<Pair<String, HexKey>>()
+
     /** Each schedule's merged tags by event id: an event never changes, so neither does its plaintext. Never logged. */
     private val decrypted = ConcurrentHashMap<String, ScheduledTask>()
 
@@ -187,38 +190,81 @@ class Runner(
         settled.keys.retainAll { it.owner in byOwner && it.occurrence >= oldest }
         failedInARow.clear()
         val reads = nostr.schedules(byOwner.keys, alwaysOwnRelays = pending + nextWake.keys.map { it.owner })
-        decrypted.keys.retainAll(reads.map { it.event.id }.toSet())
+        val ids = reads.mapTo(HashSet()) { it.event.id }
+        decrypted.keys.retainAll(ids)
+        unreadable.retainAll { it.first in ids }
         val at = now()
         nextWake.values.removeIf { it <= at }
+        val paired = reads.mapNotNull { read -> byOwner[read.event.pubKey]?.let { read to it } }
+        // The keys this poll decrypts with, read in one batch, and zeroed once the poll is done.
+        val keys = keysFor(paired.filter { (read, pair) -> needsKey(read, pair) }.map { it.second.owner })
         val gate = Semaphore(parallelism)
         val outcomes =
-            coroutineScope {
-                reads
-                    .mapNotNull { read -> byOwner[read.event.pubKey]?.let { read to it } }
-                    .map { (read, pair) ->
-                        async {
-                            val key = ScheduleKey(pair.owner, read.event.dTag())
-                            key to
-                                gate.withPermit {
-                                    try {
-                                        decide(read, pair)
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        // The class only: a message could carry what a relay, the database or a service echoed.
-                                        report(pair.owner, RunnerOutcome.ERROR, e.javaClass.simpleName)
+            try {
+                coroutineScope {
+                    paired
+                        .map { (read, pair) ->
+                            async {
+                                val key = ScheduleKey(pair.owner, read.event.dTag())
+                                key to
+                                    gate.withPermit {
+                                        try {
+                                            decide(read, pair, keys)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            // The class only: a message could carry what a relay, the database or a service echoed.
+                                            report(pair.owner, RunnerOutcome.ERROR, e.javaClass.simpleName)
+                                        }
                                     }
-                                }
-                        }
-                    }.awaitAll()
+                            }
+                        }.awaitAll()
+                }
+            } finally {
+                keys?.values?.forEach { wipe(it) }
             }
         pending = outcomes.filter { it.second in PENDING }.mapTo(HashSet()) { it.first.owner }
         return outcomes.toMap(LinkedHashMap())
     }
 
+    /** Whether [read] will need its owner's key: named this owner's Assistant alone, read with a quorum, not decrypted yet. */
+    private fun needsKey(
+        read: ScheduleRead,
+        pair: AssistantPair,
+    ): Boolean {
+        val event = read.event
+        return read.quorum &&
+            event.pubKey == pair.owner &&
+            !decrypted.containsKey(event.id) &&
+            (event.id to pair.assistant) !in unreadable &&
+            ScheduledTask(event.tags).runners == listOf(pair.assistant)
+    }
+
+    /** [owners]' keys in one batch; null when it failed (each then fails on its own, by the exception's class). */
+    private suspend fun keysFor(owners: List<HexKey>): Map<HexKey, AssistantKey>? {
+        if (owners.isEmpty()) return emptyMap()
+        return try {
+            directory.keys(owners)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG) { "could not read ${owners.size} Assistant keys: ${e.javaClass.simpleName}" }
+            null
+        }
+    }
+
+    /** Zeroes a key's private bytes: the signer is never used after. */
+    private fun wipe(key: AssistantKey) {
+        if (key is AssistantKey.Ready) {
+            key.signer.keyPair.privKey
+                ?.fill(0)
+        }
+    }
+
     private suspend fun decide(
         read: ScheduleRead,
         pair: AssistantPair,
+        keys: Map<HexKey, AssistantKey>?,
     ): RunnerOutcome {
         val event = read.event
         val owner = pair.owner
@@ -233,10 +279,18 @@ class Runner(
         // Too few of the owner's relays answered: a newer version (the task taken back) may be on the others.
         if (!read.quorum) return report(owner, RunnerOutcome.NO_QUORUM)
 
+        // A version that didn't decrypt with this Assistant's key never will: not tried again.
+        if ((event.id to pair.assistant) in unreadable) return report(owner, RunnerOutcome.UNREADABLE)
         val task =
-            decrypted[event.id] ?: when (val opened = open(event, owner)) {
-                is Opened.Task -> opened.task.also { decrypted[event.id] = it }
-                is Opened.Failed -> return report(owner, opened.outcome)
+            decrypted[event.id] ?: when (val opened = open(event, owner, keys)) {
+                is Opened.Task -> {
+                    opened.task.also { decrypted[event.id] = it }
+                }
+
+                is Opened.Failed -> {
+                    if (opened.outcome == RunnerOutcome.UNREADABLE) unreadable += event.id to pair.assistant
+                    return report(owner, opened.outcome)
+                }
             }
         val name = task.task ?: return report(owner, RunnerOutcome.UNKNOWN_TASK)
         val service = services.serviceFor(name) ?: return report(owner, RunnerOutcome.UNKNOWN_TASK)
@@ -327,9 +381,24 @@ class Runner(
     private suspend fun open(
         event: ScheduledTaskEvent,
         owner: HexKey,
+        keys: Map<HexKey, AssistantKey>?,
+    ): Opened {
+        // The poll's batch has it; one it doesn't (it failed, or the checks disagreed) is read alone, and zeroed here.
+        val batched = keys?.get(owner)
+        val key = batched ?: directory.key(owner)
+        try {
+            return openWith(event, key)
+        } finally {
+            if (batched == null) wipe(key)
+        }
+    }
+
+    private suspend fun openWith(
+        event: ScheduledTaskEvent,
+        key: AssistantKey,
     ): Opened {
         val signer =
-            when (val key = directory.key(owner)) {
+            when (key) {
                 is AssistantKey.Ready -> {
                     key.signer
                 }

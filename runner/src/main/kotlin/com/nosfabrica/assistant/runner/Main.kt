@@ -32,6 +32,20 @@ class RunnerConfig(
         /** Brainstorm's index relay, which is also its search relay: asked with `include:spam`. */
         const val DEFAULT_INDEX_RELAY = "wss://search.brainstorm.world"
 
+        /**
+         * `INDEX_RELAYS`: every entry a `wss` relay, and at least one. A relay that didn't
+         * normalise would be dropped in silence, and with none left every owner is `NO_QUORUM`.
+         */
+        private fun indexRelays(raw: String): List<String> {
+            val relays = raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+            require(relays.isNotEmpty()) { "INDEX_RELAYS names no relay" }
+            for (r in relays) {
+                val normal = RelayUrlNormalizer.normalizeOrNull(r)
+                require(normal != null && normal.url.startsWith("wss://")) { "INDEX_RELAYS: every relay must be a wss:// URL" }
+            }
+            return relays
+        }
+
         fun fromEnv(env: Map<String, String> = System.getenv()): RunnerConfig {
             fun opt(name: String) = env[name]?.trim()?.takeIf { it.isNotEmpty() }
 
@@ -50,7 +64,7 @@ class RunnerConfig(
             return RunnerConfig(
                 db = Db.fromEnv(env),
                 keysFile = opt("NSEC_KEYS_FILE") ?: FernetKeyFile.DEFAULT_PATH,
-                indexRelays = opt("INDEX_RELAYS")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: listOf(DEFAULT_INDEX_RELAY),
+                indexRelays = opt("INDEX_RELAYS")?.let(::indexRelays) ?: listOf(DEFAULT_INDEX_RELAY),
                 services = services,
                 pollSeconds = seconds("POLL_SECONDS", 300, 30),
                 wakeRetrySeconds = seconds("WAKE_RETRY_SECONDS", Runner.DEFAULT_WAKE_RETRY_SECONDS, 60),
@@ -151,7 +165,10 @@ fun main() {
         },
     )
 
-    Log.i(TAG) { "started: ${keys.keyCount()} Fernet keys, ${index.size} index relays, tasks ${config.services.tasks.sorted()}" }
+    val keyCount = keys.keyCount()
+    Log.i(TAG) { "started: $keyCount Fernet keys, ${index.size} index relays, tasks ${config.services.tasks.sorted()}" }
+    // Not fatal: the server may write the file after this starts. Until then every encrypted key is NSEC_UNREADABLE.
+    if (keyCount == 0) Log.w(TAG) { "the key file (NSEC_KEYS_FILE) holds no Fernet key: no encrypted Assistant key will open" }
     val end =
         try {
             runBlocking { scope.async { loop.run() }.await() }
