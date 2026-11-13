@@ -107,6 +107,45 @@ class RunnerTest : RunnerWorld() {
         }
 
     @Test
+    fun anOwnerWhoseRelayListWasNotReadHasNoQuorum() =
+        runTest {
+            world()
+            schedule()
+            // The index serves the schedule, but CLOSEs the relay-list read: the owner's relays are
+            // unknown, not "none", and the index alone can't stand in for them.
+            relays.refuses = { relay, filter -> relay == index && filter.kinds == listOf(10002) }
+            assertEquals(RunnerOutcome.NO_QUORUM, runner.poll()[mine])
+            assertTrue(waker.wakes.isEmpty())
+            relays.refuses = { _, _ -> false }
+            assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
+        }
+
+    @Test
+    fun anOwnerWhoseListedRelaysAreAllRefusedHasNoQuorum() =
+        runTest {
+            // Every write relay the owner lists is refused (plain ws, an internal host): none is asked.
+            relays.put(
+                index,
+                owner.signed(
+                    10002,
+                    arrayOf(arrayOf("r", "ws://owner.example", "write"), arrayOf("r", "wss://10.0.0.1", "write")),
+                    createdAt = 1,
+                ),
+            )
+            schedule()
+            assertEquals(RunnerOutcome.NO_QUORUM, runner.poll()[mine])
+            assertTrue(waker.wakes.isEmpty())
+        }
+
+    @Test
+    fun anOwnerKnownToHaveNoRelayListIsReadOnTheIndex() =
+        runTest {
+            // The index answered the relay-list read in full and holds none: the index is all there is.
+            schedule()
+            assertEquals(RunnerOutcome.WOKEN, runner.poll()[mine])
+        }
+
+    @Test
     fun aWakeIsNotRepeatedWithinTheRetryTime() =
         runTest {
             world()

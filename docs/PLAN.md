@@ -58,6 +58,9 @@ Each poll (default every 5 minutes):
 2. **Schedules.** Read kind 34817 by author (the owners), with the quorum rules the
    the-nostr-observer worker already has (`RunnerRelays`, moved here as is):
    - index relays first, then each owner's NIP-65 write relays;
+   - the quorum is more than half the owner's write relays. The index relays stand in only when
+     an index relay answered for the owner in full and holds no list: an unread list (CLOSED, a
+     timeout, a cap) or one whose every relay is refused is `NO_QUORUM`, never the index alone;
    - a full page counts as unanswered;
    - every relay gets 20 s and 2,000 events;
    - events must verify, and be dated at most 10 minutes ahead;

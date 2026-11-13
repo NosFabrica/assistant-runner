@@ -42,7 +42,10 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
    heap of 512 MB or more.
 3. `ScheduledTaskClaims.checkRunner(event, assistant, owner)`: exactly one public `p`, the owner's
    Assistant, authored by that owner. No `p` is `NOT_NAMED`; more than half the owner's write
-   relays must have answered (`NO_QUORUM`).
+   relays must have answered (`NO_QUORUM`). The index relays stand in only for an owner an index
+   relay answered for in full and found no NIP-65 list for: a list read that failed (CLOSED, a
+   timeout, a cap) is `NO_QUORUM`, and so is a list whose every write relay is refused (`ws`, an
+   internal host).
 4. Decrypts the private tags with the Assistant's key, the owner as NIP-44 peer
    (`ScheduledTaskEvent.task`). The plaintext stays in memory by event id.
 5. The `task` tag picks the service (`TASK_URL_<TASK>`); others are `UNKNOWN_TASK`.
