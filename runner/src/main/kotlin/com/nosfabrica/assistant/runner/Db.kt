@@ -20,20 +20,46 @@ class Db(
     private val user: String?,
     private val password: String?,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** How long a call waits for the server's answer before the connection is given up ([SOCKET_TIMEOUT_SECONDS]). */
+    private val socketTimeoutSeconds: Int = SOCKET_TIMEOUT_SECONDS,
+    /** How long connecting and logging in may take, all of it ([LOGIN_TIMEOUT_SECONDS]). */
+    private val loginTimeoutSeconds: Int = LOGIN_TIMEOUT_SECONDS,
+    /** The server cancels a statement past this ([STATEMENT_TIMEOUT_MS]). */
+    private val statementTimeoutMs: Long = STATEMENT_TIMEOUT_MS,
 ) {
     init {
         require(url.startsWith("jdbc:postgresql:")) { "DATABASE_URL must be a jdbc:postgresql: URL" }
     }
 
-    /** A new connection, autocommit on. The caller closes it. */
-    fun connect(): Connection {
+    /** This database with other bounds or another URL: the same role. For tests. */
+    fun with(
+        url: String = this.url,
+        socketTimeoutSeconds: Int = this.socketTimeoutSeconds,
+        loginTimeoutSeconds: Int = this.loginTimeoutSeconds,
+        statementTimeoutMs: Long = this.statementTimeoutMs,
+    ) = Db(url, user, password, io, socketTimeoutSeconds, loginTimeoutSeconds, statementTimeoutMs)
+
+    /**
+     * A new connection, autocommit on, with [settings] set for its session (`-c name=value`, each
+     * one a setting any role may set). The caller closes it.
+     *
+     * Every step is bounded: the TCP connect ([CONNECT_TIMEOUT_SECONDS]), the login, each answer
+     * (a partition otherwise holds a query until the kernel gives up, two hours on), and each
+     * statement on the server's side. The socket timeout bounds a call waiting for its answer,
+     * never a connection sitting idle, so the leader lock's connection is not affected by it.
+     */
+    fun connect(settings: Map<String, String> = emptyMap()): Connection {
         val props = Properties()
         user?.let { props.setProperty("user", it) }
         password?.let { props.setProperty("password", it) }
         // A dead peer is noticed by the OS, not only by the next query: the leader lock's
         // connection sits idle between polls.
         props.setProperty("tcpKeepAlive", "true")
-        props.setProperty("connectTimeout", "10")
+        props.setProperty("connectTimeout", CONNECT_TIMEOUT_SECONDS.toString())
+        props.setProperty("loginTimeout", loginTimeoutSeconds.toString())
+        props.setProperty("socketTimeout", socketTimeoutSeconds.toString())
+        val options = mapOf("statement_timeout" to statementTimeoutMs.toString()) + settings
+        props.setProperty("options", options.entries.joinToString(" ") { (k, v) -> "-c $k=$v" })
         props.setProperty("ApplicationName", "assistant-runner")
         // Through the driver itself, not DriverManager: a jar the service loader didn't register
         // (a shaded build, an isolated class loader) still connects.
@@ -48,6 +74,11 @@ class Db(
 
     companion object {
         private val DRIVER = Driver()
+
+        const val CONNECT_TIMEOUT_SECONDS = 10
+        const val LOGIN_TIMEOUT_SECONDS = 15
+        const val SOCKET_TIMEOUT_SECONDS = 30
+        const val STATEMENT_TIMEOUT_MS = 30_000L
 
         /** `DATABASE_URL` (a JDBC URL), `DATABASE_USER`, `DATABASE_PASSWORD`. */
         fun fromEnv(env: Map<String, String> = System.getenv()): Db {

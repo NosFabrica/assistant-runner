@@ -72,7 +72,7 @@ enum class RunnerOutcome {
     /** A device of the owner finished it (`ran`). */
     ALREADY_DONE,
 
-    /** The runner is stopping: no new wake. */
+    /** The runner is stopping, or no longer holds the leader lock: no new wake. */
     STOPPING,
     ERROR,
 }
@@ -132,8 +132,8 @@ class Runner(
     private val wakeRetrySeconds: Long = DEFAULT_WAKE_RETRY_SECONDS,
     /** How many schedules are decided (and woken) at once. */
     private val parallelism: Int = PARALLELISM,
-    /** False once the runner is stopping: no new wake. */
-    private val accepting: () -> Boolean = { true },
+    /** False once the runner is stopping, or has lost the leader lock: no new wake. */
+    private val accepting: suspend () -> Boolean = { true },
 ) {
     private data class WakeKey(
         val task: String,

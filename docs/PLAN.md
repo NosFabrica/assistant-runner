@@ -48,6 +48,21 @@ One process. **Exactly one is active**: it holds a Postgres advisory lock (`pg_t
 on a dedicated connection. A second pod, during a rolling deploy for example, waits for the lock.
 If that connection drops, the runner exits and the orchestrator restarts it.
 
+- **`DATABASE_URL` must reach the primary directly, in session mode.** Behind a transaction-mode
+  pooler the lock's session isn't the runner's, and a standby gives every runner its own lock.
+  The runner refuses to lead on a standby (`pg_is_in_recovery()`); a pooler it can't see.
+- The lock is checked every 30 s between polls and every 5 s during one: a lock lost mid-poll
+  cancels the poll, and every wake first asks whether the lock still holds (an answer at most 5 s
+  old), so two runners never wake for long side by side.
+- The lock's session sets its own TCP keepalives (`tcp_keepalives_idle=30`, `_interval=10`,
+  `_count=3`, `tcp_user_timeout=60000`, `idle_session_timeout=0`; all `user` context, no grant):
+  after a partition the server frees the lock within about a minute.
+- Every connection is bounded: connect 10 s, login 15 s, an answer 30 s (`socketTimeout`, which
+  never touches an idle connection), a statement 30 s (`statement_timeout`).
+
+Polls start every `POLL_SECONDS` on a monotonic clock, from one start to the next: a poll that took
+longer is followed at once.
+
 Each poll (default every 5 minutes):
 
 1. **Pairs.** Page `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE pubkey ~

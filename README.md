@@ -64,7 +64,7 @@ Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debu
 
 | Variable | Default | |
 |---|---|---|
-| `DATABASE_URL` | (required) | JDBC URL of brainstorm_server's Postgres, e.g. `jdbc:postgresql://postgres:5432/brainstorm` |
+| `DATABASE_URL` | (required) | JDBC URL of brainstorm_server's Postgres, e.g. `jdbc:postgresql://postgres:5432/brainstorm`: **the primary, directly** (below). Don't set `options`, `socketTimeout` or `loginTimeout` in it: the URL's would replace the runner's |
 | `DATABASE_USER`, `DATABASE_PASSWORD` | | the `assistant_runner` role (below). A secret: from a k8s Secret |
 | `NSEC_KEYS_FILE` | `/run/secrets/nsec_encryption_keys` | the Fernet key file brainstorm_server writes, mounted read-only |
 | `INDEX_RELAYS` | `wss://search.brainstorm.world` | comma-separated. The search relay is asked with `include:spam` |
@@ -85,6 +85,16 @@ tag's version, and `latest` on `main`. Staging pins one of those tags. By hand:
 
 - One Deployment. Two replicas are safe (the second waits for the leader lock), but one is enough.
   No Service, no Ingress: nothing connects to it.
+- **`DATABASE_URL` must be a direct, session-mode connection to the primary.** The leader lock is
+  a session advisory lock: behind pgbouncer in transaction mode its session is anyone's, and on a
+  standby every runner gets a lock of its own, so two would lead. The runner refuses to lead on a
+  standby (`pg_is_in_recovery()`), but it can't see a pooler.
+- Every database call is bounded: 10 s to connect, 15 s to log in, 30 s for an answer
+  (`socketTimeout`), and 30 s per statement on the server (`statement_timeout`). The lock's own
+  session sets TCP keepalives (30 s idle, 10 s apart, 3 tries) and a 60 s `tcp_user_timeout`, so
+  after a partition the server frees the lock within about a minute, not two hours; any role may
+  set them. While a poll runs the lock is checked every 5 s and the poll cancelled when it is
+  gone, and every wake waits on a check at most 5 s old.
 - Its role needs one column grant and nothing else: no schema, no CREATE (it writes nothing; the
   advisory lock needs no grant):
 

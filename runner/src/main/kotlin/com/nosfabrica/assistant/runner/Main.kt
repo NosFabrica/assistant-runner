@@ -122,6 +122,7 @@ fun main() {
             ),
             scope,
         )
+    val leadership = LeadershipGate({ withContext(Dispatchers.IO) { lock.isAlive() } })
     val runner =
         Runner(
             directory = AssistantKeys(config.db, keys),
@@ -129,7 +130,8 @@ fun main() {
             waker = HttpTaskWaker(serviceClient),
             services = config.services,
             wakeRetrySeconds = config.wakeRetrySeconds,
-            accepting = { !stopping.get() },
+            // Before every wake: not stopping, and still the leader (asked again when the last answer is over 5 s old).
+            accepting = { !stopping.get() && leadership.holds() },
         )
     val loop =
         RunnerLoop(
