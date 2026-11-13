@@ -28,8 +28,9 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
 
 ## What one poll does
 
-1. Pages `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE assistant_pubkey IS NOT NULL
-   ORDER BY pubkey`, 500 at a time. Nothing is decrypted.
+1. Pages `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE pubkey ~ '^[0-9a-f]{64}$' AND
+   assistant_pubkey ~ '^[0-9a-f]{64}$' ORDER BY pubkey`, 500 at a time. Nothing is decrypted. A row
+   the server wrote wrong is left out by the query itself, so it never ends the paging early.
 2. Reads every kind 34817 by those owners (by author, never `#p` or `#d`): the index relays first,
    then each owner's NIP-65 write relays, with the worker's quorum rules (a full page counts as
    unanswered; each relay gets 20 s and 2,000 events; events must verify and be dated at most 10

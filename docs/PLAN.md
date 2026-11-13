@@ -50,8 +50,10 @@ If that connection drops, the runner exits and the orchestrator restarts it.
 
 Each poll (default every 5 minutes):
 
-1. **Pairs.** Page `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE assistant_pubkey IS
-   NOT NULL ORDER BY pubkey` (by `pubkey > ?`), the server's own `select_owner_assistant_pairs_on_db`.
+1. **Pairs.** Page `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE pubkey ~
+   '^[0-9a-f]{64}$' AND assistant_pubkey ~ '^[0-9a-f]{64}$' ORDER BY pubkey` (by `pubkey > ?`), the
+   server's own `select_owner_assistant_pairs_on_db` with the rows no schedule could match left out
+   in SQL (a page short of the limit ends the paging, so they can't be filtered after it).
    Nothing is decrypted to list them.
 2. **Schedules.** Read kind 34817 by author (the owners), with the quorum rules the
    the-nostr-observer worker already has (`RunnerRelays`, moved here as is):
