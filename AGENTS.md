@@ -8,17 +8,21 @@ the repo, not them.
 
 ## What this is
 
-- `core/`: a library both the runner and the task services (the Observer) use: Fernet and the
-  key file, `AssistantKeys` over four columns of brainstorm_server's `brainstorm_nsec` table
-  (`pubkey`, `assistant_pubkey`, `encrypted_nsec`, `nsec`, granted column by column: a server
-  migration that renames or drops one breaks the services), the
-  `assistant_runner` schema (migrations, `RunStore`, `PendingStore`), the leader lock, and the
-  trigger contract's types. Its test fixtures start a throwaway Postgres cluster.
 - `runner/`: the Brainstorm Assistants' scheduler, a container beside brainstorm_server. It reads
   the NIP-FB schedules (kind 34817) that name an owner's Assistant as runner, decrypts them with
   the Assistant's key, decides with Quartz, and wakes the task's service (`POST /v1/run`). It
-  prints, signs and spends nothing, and writes nothing about runs.
+  prints, signs and spends nothing, and writes nothing anywhere: "already started here" is the
+  service's `200` answer, kept in memory. Its key reading (Fernet, the key file, `AssistantKeys`
+  over four columns of brainstorm_server's `brainstorm_nsec`: `pubkey`, `assistant_pubkey`,
+  `encrypted_nsec`, `nsec`, granted column by column, so a server migration that renames or drops
+  one breaks it) and the leader lock are its own. Its tests start a throwaway Postgres cluster.
 - `contract/v1/`: the JSON both sides test against. A change that breaks a vector is `v2`.
+
+**No code is shared with the task services, in either direction.** Never add a library module
+for them, a dependency on their repositories, or a read of their tables. The Observer has its own
+copy of the key reading and its own schema; what the two share is only the wake's contract (these
+vectors, which the Observer copies into its test resources), the server's four columns and the
+Fernet key file. A fix to the key reading is ported by hand to the other side.
 
 The relay reads (`RunnerRelays.kt`) and the SSRF guard (`SafeHttp.kt`) came from
 the-nostr-observer's `runner/`. Port fixes between the two rather than letting them drift.
@@ -46,8 +50,7 @@ invocation at a time**, `--max-workers=2`, and stop the daemons when done.
   decrypts a kind 12000, never publishes. Anything that spends is the task service's.
 - **Postgres** is plain JDBC (`org.postgresql:postgresql`), every call on `Dispatchers.IO`, one
   connection per operation (no pool: a poll every five minutes makes a handful of calls). The
-  `assistant_runner` schema changes only by a new versioned file in
-  `core/src/main/resources/assistant_runner/`, never by editing one that shipped.
+  runner only reads, and holds its advisory lock: its role has a column grant and no schema.
 - **Quartz** comes from JitPack pinned by a full commit hash (`gradle/libs.versions.toml`).
   Hashes carry no order, so every module `force()`s the pin; the only relation between two
   hashes is `git merge-base --is-ancestor`. Quartz is KMP with Android in its graph, so

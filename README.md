@@ -7,23 +7,24 @@ occurrence is due. It prints nothing, signs nothing and spends nothing.
 The design is [`docs/PLAN.md`](docs/PLAN.md); the trigger contract is [`contract/v1/`](contract/v1/);
 the rules for working here are in [`AGENTS.md`](AGENTS.md).
 
-## Modules
+## What's here
 
-- **`:core`**, a library the runner and the task services share:
-  - `Fernet`, `MultiFernet`, `FernetKeyFile`: brainstorm_server's nsec encryption, read from its
-    key file (re-read on an mtime change, and once more on a token no key opens);
-  - `AssistantKeys` (an `AssistantDirectory`): brainstorm_server's `brainstorm_nsec` table, read
-    as its own repo reads it (four columns: `pubkey`, `assistant_pubkey`, `encrypted_nsec`,
-    `nsec`; a server migration that renames or drops one breaks the services), paged without
-    decrypting, and one owner's Assistant key as a Quartz `NostrSignerInternal`, or
-    `NO_ASSISTANT` / `NSEC_UNREADABLE` / `NSEC_MISMATCH`;
-  - `Db`, `Migrations` (the `assistant_runner` schema), `RunStore`, `PendingStore`, each with a
-    Postgres and an in-memory implementation;
-  - `LeaderLock`: one active runner;
-  - `WakeRequest`, `SettledAnswer`: the trigger contract's bodies, parsed and validated.
-- **`:runner`**, the scheduler (`Main.kt`, `Runner.kt`, `RunnerLoop.kt`, `TaskWaker.kt`), with the
-  relay reads (`RunnerRelays.kt`) and the SSRF guard (`SafeHttp.kt`) moved from
-  the-nostr-observer's worker.
+One module, **`:runner`**, the scheduler:
+- `Main.kt`, `Runner.kt`, `RunnerLoop.kt`, `TaskWaker.kt`, with the relay reads
+  (`RunnerRelays.kt`) and the SSRF guard (`SafeHttp.kt`) moved from the-nostr-observer's worker;
+- `Fernet`, `MultiFernet`, `FernetKeyFile`: brainstorm_server's nsec encryption, read from its key
+  file (re-read on an mtime change, and once more on a token no key opens);
+- `AssistantKeys` (an `AssistantDirectory`): brainstorm_server's `brainstorm_nsec` table, read as
+  its own repo reads it (four columns: `pubkey`, `assistant_pubkey`, `encrypted_nsec`, `nsec`; a
+  server migration that renames or drops one breaks the runner), paged without decrypting, and one
+  owner's Assistant key as a Quartz `NostrSignerInternal`, or `NO_ASSISTANT` / `NSEC_UNREADABLE` /
+  `NSEC_MISMATCH`;
+- `Db` (read-only) and `LeaderLock`: one active runner;
+- `WakeRequest`, `SettledAnswer`: the wake it sends and the answer it reads.
+
+**No code is shared with the task services.** The Observer has its own copy of the key reading and
+its own state; the two share only the wake's contract (the vectors in `contract/v1/`, which it
+copies into its tests), the server's four `brainstorm_nsec` columns and the Fernet key file.
 
 ## What one poll does
 
@@ -39,10 +40,14 @@ the rules for working here are in [`AGENTS.md`](AGENTS.md).
 4. Decrypts the private tags with the Assistant's key, the owner as NIP-44 peer
    (`ScheduledTaskEvent.task`). The plaintext stays in memory by event id.
 5. The `task` tag picks the service (`TASK_URL_<TASK>`); others are `UNKNOWN_TASK`.
-6. Decides with `ScheduledTaskClaims.decideAsRunner`; "already started here" is a row in
-   `assistant_runner.runs` for (task, owner, occurrence).
+6. Decides with `ScheduledTaskClaims.decideAsRunner`; "already started here" is the service's own
+   `200 {outcome}` for (task, owner, occurrence), kept in memory.
 7. Wakes `POST {TASK_URL_<TASK>}/v1/run` with `{"v":1,"task","owner","occurrence"}`, at most once
-   per (task, owner, occurrence) every `WAKE_RETRY_SECONDS`, or after a `429`'s `Retry-After`.
+   per (task, owner, occurrence) every `WAKE_RETRY_SECONDS`, or after a `429`'s `Retry-After`,
+   until the service answers `200`: then never again for that occurrence. A restart forgets what
+   was settled, which costs at most one wake per due occurrence, answered as settled.
+
+The runner writes nothing, to Postgres or anywhere else.
 
 Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debug.
 
@@ -51,15 +56,15 @@ Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debu
 | Variable | Default | |
 |---|---|---|
 | `DATABASE_URL` | (required) | JDBC URL of brainstorm_server's Postgres, e.g. `jdbc:postgresql://postgres:5432/brainstorm` |
-| `DATABASE_USER`, `DATABASE_PASSWORD` | | the `assistant_runner` role (PLAN.md, "Roles and grants"). A secret: from a k8s Secret |
+| `DATABASE_USER`, `DATABASE_PASSWORD` | | the `assistant_runner` role (below). A secret: from a k8s Secret |
 | `NSEC_KEYS_FILE` | `/run/secrets/nsec_encryption_keys` | the Fernet key file brainstorm_server writes, mounted read-only |
 | `INDEX_RELAYS` | `wss://search.brainstorm.world` | comma-separated. The search relay is asked with `include:spam` |
 | `TASK_URL_<TASK>` | (at least one) | a task service's base URL, e.g. `TASK_URL_OBSERVER=http://observer:8080` |
 | `POLL_SECONDS` | `300` | at least 30 |
 | `WAKE_RETRY_SECONDS` | `600` | at least 60 |
 
-Exit status: `2` a bad setting, `4` the leader lock's connection died, `5` the migration or the
-loop failed. The orchestrator restarts it.
+Exit status: `2` a bad setting, `4` the leader lock's connection died, `5` the loop failed. The
+orchestrator restarts it.
 
 ## Deploying beside brainstorm_server
 
@@ -67,8 +72,12 @@ loop failed. The orchestrator restarts it.
 
 - One Deployment. Two replicas are safe (the second waits for the leader lock), but one is enough.
   No Service, no Ingress: nothing connects to it.
-- It migrates `assistant_runner` at startup, under its own advisory lock, so whichever of the
-  runner and the task services starts first does it.
+- Its role needs one column grant and nothing else: no schema, no CREATE (it writes nothing; the
+  advisory lock needs no grant):
+
+      CREATE ROLE assistant_runner LOGIN PASSWORD '…';
+      GRANT SELECT (pubkey, assistant_pubkey, encrypted_nsec, nsec) ON brainstorm_nsec TO assistant_runner;
+
 - Mount the same key file brainstorm_server writes (read-only). The runner holds each Assistant's
   key only to read schedules.
 - Egress: Postgres, the task services inside the cluster, and WSS to relays, directly (an owner's

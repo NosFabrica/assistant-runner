@@ -7,7 +7,7 @@ RUN ./gradlew :runner:installDist --no-daemon --console=plain
 
 FROM eclipse-temurin:21-jre
 COPY --from=build /src/runner/build/install/assistant-runner /opt/assistant-runner
-# No volume: the runner's state is in Postgres (the leader lock, the runs it reads) and in
-# memory (the last wake per occurrence, which a restart only repeats once).
+# No volume and no state of its own: the leader lock is a Postgres session lock, and the rest (the
+# last wake and the settled occurrences) is in memory, which a restart costs one wake to rebuild.
 USER 65534:65534
 ENTRYPOINT ["/opt/assistant-runner/bin/assistant-runner"]
