@@ -55,6 +55,21 @@ abstract class PendingStoreContract {
         }
 
     @Test
+    fun theOwnersWithAnOutputWaitingAreListedOncePerTask() =
+        runBlocking {
+            val store = store()
+            assertEquals(emptyList(), store.owners("observer"))
+            val other = "a".repeat(64)
+            store.put(paper(100))
+            store.put(paper(200))
+            store.put(Pending("observer", other, 100, buildJsonObject {}, 1_000, emptyList()))
+            store.put(Pending("other", "c".repeat(64), 100, buildJsonObject {}, 1_000, emptyList()))
+            assertEquals(listOf(other, owner), store.owners("observer"))
+            store.delete("observer", other, 100)
+            assertEquals(listOf(owner), store.owners("observer"))
+        }
+
+    @Test
     fun aPutReplacesTheSameOccurrence() =
         runBlocking {
             val store = store()

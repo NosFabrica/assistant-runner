@@ -59,6 +59,12 @@ interface PendingStore {
         owner: HexKey,
     ): List<Pending>
 
+    /**
+     * The owners with an output of [task] waiting, in order: what a task service's retry loop
+     * walks, publishing each owner's again.
+     */
+    suspend fun owners(task: String): List<HexKey>
+
     suspend fun delete(
         task: String,
         owner: HexKey,
@@ -135,6 +141,14 @@ class PostgresPendingStore(
             }
         }
 
+    override suspend fun owners(task: String): List<HexKey> =
+        db.use { c ->
+            c.prepareStatement("SELECT DISTINCT owner FROM $PENDING WHERE task = ? ORDER BY owner").use { st ->
+                st.setString(1, task)
+                st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
+            }
+        }
+
     private fun files(
         c: Connection,
         task: String,
@@ -201,6 +215,15 @@ class MemoryPendingStore : PendingStore {
         task: String,
         owner: HexKey,
     ): List<Pending> = synchronized(rows) { rows.values.filter { it.task == task && it.owner == owner }.sortedBy { it.occurrence } }
+
+    override suspend fun owners(task: String): List<HexKey> =
+        synchronized(rows) {
+            rows.values
+                .filter { it.task == task }
+                .map { it.owner }
+                .distinct()
+                .sorted()
+        }
 
     override suspend fun delete(
         task: String,
