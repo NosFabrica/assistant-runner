@@ -68,6 +68,10 @@ orchestrator restarts it.
 
 ## Deploying beside brainstorm_server
 
+CI (`.github/workflows/build.yml`) builds and pushes the image on every push, after the tests
+pass: `ghcr.io/nosfabrica/assistant-runner`, tagged with the branch name, `sha-<short>`, a `v*`
+tag's version, and `latest` on `main`. Staging pins one of those tags. By hand:
+
     docker build -t assistant-runner .
 
 - One Deployment. Two replicas are safe (the second waits for the leader lock), but one is enough.
