@@ -9,7 +9,9 @@ the repo, not them.
 ## What this is
 
 - `core/`: a library both the runner and the task services (the Observer) use: Fernet and the
-  key file, `AssistantKeys` over brainstorm_server's `assistant_keys_v1` view, the
+  key file, `AssistantKeys` over four columns of brainstorm_server's `brainstorm_nsec` table
+  (`pubkey`, `assistant_pubkey`, `encrypted_nsec`, `nsec`, granted column by column: a server
+  migration that renames or drops one breaks the services), the
   `assistant_runner` schema (migrations, `RunStore`, `PendingStore`), the leader lock, and the
   trigger contract's types. Its test fixtures start a throwaway Postgres cluster.
 - `runner/`: the Brainstorm Assistants' scheduler, a container beside brainstorm_server. It reads

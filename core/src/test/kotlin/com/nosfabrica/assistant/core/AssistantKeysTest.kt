@@ -14,7 +14,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 
-/** The view brainstorm_server will migrate, the server's fallback rules, and nothing logged. */
+/** brainstorm_server's `brainstorm_nsec` read as its repo reads it, its fallback rules, and nothing logged. */
 class AssistantKeysTest {
     private class Person {
         val keys = KeyPair()
@@ -116,18 +116,33 @@ class AssistantKeysTest {
         }
 
     @Test
-    fun theRunnersRoleReadsTheViewAndNotTheTable() =
+    fun theRunnersRoleReadsItsFourColumnsAndNoOther() =
         runTest {
             val db = world()
             val a = Person()
             val owner = Person().pubkey
             BrainstormSchema.insert(db, owner, a.pubkey, a.nsec, encrypt(a.nsec))
             val role = TestPostgres.runnerRole(db)
-            assertIs<AssistantKey.Ready>(AssistantKeys(role, keyFile).key(owner))
-            assertFailsWith<SQLException> {
-                role.use { c ->
-                    c.createStatement().use { it.executeQuery("SELECT nsec FROM brainstorm_nsec") }
+            val keys = AssistantKeys(role, keyFile)
+            assertIs<AssistantKey.Ready>(keys.key(owner))
+            assertEquals(listOf(AssistantPair(owner, a.pubkey)), keys.pairs())
+            for (column in listOf("session_version", "nip05_local_part", "*")) {
+                assertFailsWith<SQLException>(column) {
+                    role.use { c -> c.createStatement().use { it.executeQuery("SELECT $column FROM brainstorm_nsec") } }
                 }
             }
+        }
+
+    @Test
+    fun anOwnerRowWithoutAnAssistantIsNoAssistantAndNotListed() =
+        runTest {
+            val db = world()
+            val a = Person()
+            val owner = Person().pubkey
+            // A user who never got an Assistant: the server's row, with its nsec, and no assistant_pubkey.
+            BrainstormSchema.insert(db, owner, null, a.nsec, encrypt(a.nsec))
+            val keys = AssistantKeys(db, keyFile)
+            assertEquals(KeyFailure.NO_ASSISTANT, assertIs<AssistantKey.Failed>(keys.key(owner)).failure)
+            assertEquals(emptyList(), keys.pairs())
         }
 }

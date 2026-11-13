@@ -62,8 +62,9 @@ object TestPostgres {
     }
 
     /**
-     * A login role on [db]'s server, with the plan's grants (PLAN.md, "Roles and grants"):
-     * SELECT on the view and the `assistant_runner` schema as its own. Connects with [password].
+     * A login role on [db]'s server, with the plan's grants (PLAN.md, "Roles and grants"): SELECT
+     * on the four columns of `brainstorm_nsec` the services read, and the `assistant_runner`
+     * schema as its own. Connects with [password].
      */
     fun runnerRole(
         db: Db,
@@ -79,7 +80,7 @@ object TestPostgres {
         db.connect().use { c ->
             c.createStatement().use { st ->
                 st.execute("CREATE ROLE $name LOGIN PASSWORD '$password'")
-                st.execute("GRANT SELECT ON ${AssistantKeys.VIEW} TO $name")
+                st.execute("GRANT SELECT (${AssistantKeys.COLUMNS.joinToString()}) ON ${AssistantKeys.TABLE} TO $name")
                 st.execute("CREATE SCHEMA IF NOT EXISTS ${Migrations.SCHEMA} AUTHORIZATION $name")
             }
         }
@@ -157,12 +158,15 @@ object TestPostgres {
     }
 }
 
-/** brainstorm_server's side, as much of it as the runner reads: the `brainstorm_nsec` table and the plan's view. */
+/**
+ * brainstorm_server's side, as much of it as the services read: the `brainstorm_nsec` table, shaped
+ * as `app/db_models`' `BrainstormNsec` (with one column the role may not read, `session_version`).
+ * There is no view: the services read the table's four columns as the server's own repo does.
+ */
 object BrainstormSchema {
     fun create(db: Db) {
         db.connect().use { c ->
             c.createStatement().use { st ->
-                // The columns AssistantKeys' view reads, shaped as app/db_models' BrainstormNsec.
                 st.execute(
                     """
                     CREATE TABLE brainstorm_nsec (
@@ -170,20 +174,9 @@ object BrainstormSchema {
                         nsec varchar NOT NULL,
                         encrypted_nsec varchar,
                         assistant_pubkey varchar,
-                        nip05_local_part varchar
+                        nip05_local_part varchar,
+                        session_version integer NOT NULL DEFAULT 0
                     )
-                    """.trimIndent(),
-                )
-                // PLAN.md, "The keys": brainstorm_server's migration.
-                st.execute(
-                    """
-                    CREATE VIEW assistant_keys_v1 AS
-                    SELECT pubkey AS owner,
-                           assistant_pubkey AS assistant,
-                           encrypted_nsec,
-                           CASE WHEN encrypted_nsec IS NULL OR encrypted_nsec = '' THEN nsec END AS legacy_nsec
-                    FROM brainstorm_nsec
-                    WHERE assistant_pubkey IS NOT NULL
                     """.trimIndent(),
                 )
             }

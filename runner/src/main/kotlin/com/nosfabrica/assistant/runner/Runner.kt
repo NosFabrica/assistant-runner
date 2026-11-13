@@ -55,7 +55,7 @@ enum class RunnerOutcome {
     /** Too few of the owner's write relays answered to trust the schedule read is the newest. */
     NO_QUORUM,
 
-    /** The Assistant's key: no row in the view, a token no Fernet key opens, or an nsec that isn't the stored Assistant. */
+    /** The Assistant's key: no row (or no Assistant) in `brainstorm_nsec`, a token no Fernet key opens, or an nsec that isn't the stored Assistant. */
     NO_ASSISTANT,
     NSEC_UNREADABLE,
     NSEC_MISMATCH,

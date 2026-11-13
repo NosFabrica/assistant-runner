@@ -72,7 +72,7 @@ class FakeRelays : RelayAccess {
     }
 }
 
-/** brainstorm_server's view and key file, faked: each owner's Assistant, or the failure its key gives. */
+/** brainstorm_server's `brainstorm_nsec` and key file, faked: each owner's Assistant, or the failure its key gives. */
 class FakeDirectory(
     val assistants: Map<HexKey, NostrSignerInternal>,
 ) : AssistantDirectory {

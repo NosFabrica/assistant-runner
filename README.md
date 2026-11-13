@@ -12,7 +12,9 @@ the rules for working here are in [`AGENTS.md`](AGENTS.md).
 - **`:core`**, a library the runner and the task services share:
   - `Fernet`, `MultiFernet`, `FernetKeyFile`: brainstorm_server's nsec encryption, read from its
     key file (re-read on an mtime change, and once more on a token no key opens);
-  - `AssistantKeys` (an `AssistantDirectory`): the `assistant_keys_v1` view, paged without
+  - `AssistantKeys` (an `AssistantDirectory`): brainstorm_server's `brainstorm_nsec` table, read
+    as its own repo reads it (four columns: `pubkey`, `assistant_pubkey`, `encrypted_nsec`,
+    `nsec`; a server migration that renames or drops one breaks the services), paged without
     decrypting, and one owner's Assistant key as a Quartz `NostrSignerInternal`, or
     `NO_ASSISTANT` / `NSEC_UNREADABLE` / `NSEC_MISMATCH`;
   - `Db`, `Migrations` (the `assistant_runner` schema), `RunStore`, `PendingStore`, each with a
@@ -25,8 +27,8 @@ the rules for working here are in [`AGENTS.md`](AGENTS.md).
 
 ## What one poll does
 
-1. Pages `SELECT owner, assistant FROM assistant_keys_v1 ORDER BY owner`, 500 at a time. Nothing
-   is decrypted.
+1. Pages `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE assistant_pubkey IS NOT NULL
+   ORDER BY pubkey`, 500 at a time. Nothing is decrypted.
 2. Reads every kind 34817 by those owners (by author, never `#p` or `#d`): the index relays first,
    then each owner's NIP-65 write relays, with the worker's quorum rules (a full page counts as
    unanswered; each relay gets 20 s and 2,000 events; events must verify and be dated at most 10

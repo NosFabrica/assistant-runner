@@ -9,7 +9,7 @@ import com.vitorpamplona.quartz.utils.Hex
 import com.vitorpamplona.quartz.utils.Log
 import java.sql.Connection
 
-/** An owner and the Assistant brainstorm_server holds for them, as the view lists them: nothing decrypted. */
+/** An owner and the Assistant brainstorm_server holds for them, as its table lists them: nothing decrypted. */
 data class AssistantPair(
     val owner: HexKey,
     val assistant: HexKey,
@@ -17,7 +17,7 @@ data class AssistantPair(
 
 /** Why an owner's Assistant key can't be had. Logged by name, with the owner. */
 enum class KeyFailure {
-    /** The view has no row for the owner: no Assistant (or it was removed). */
+    /** `brainstorm_nsec` has no row for the owner, or one with no `assistant_pubkey`: no Assistant (or it was removed). */
     NO_ASSISTANT,
 
     /** No key in the key file opens the token, even after reading it again, or the plaintext isn't an nsec. */
@@ -73,11 +73,16 @@ interface AssistantDirectory {
 }
 
 /**
- * brainstorm_server's `assistant_keys_v1` view (owner, assistant, encrypted_nsec, legacy_nsec)
- * and its Fernet key file. Listing pairs decrypts nothing; [key] reads one owner's row and opens
- * it as the server's `_plaintext_nsec` does: `encrypted_nsec` when it is there (a value that is
- * already an `nsec1` is taken as it is, as the server's `decrypt_nsec` does), `legacy_nsec` only
- * when it is null.
+ * brainstorm_server's `brainstorm_nsec` table, read as its own repo (`app/repos/brainstorm_nsec.py`)
+ * reads it, and its Fernet key file. Only four columns ([COLUMNS]), the ones ops grants the role:
+ * the services are coupled to them, so a server migration that renames or drops one breaks them.
+ *
+ * - [page] is the server's `select_owner_assistant_pairs_on_db`: `pubkey` and `assistant_pubkey`
+ *   where an Assistant is set, by `pubkey`; nothing is decrypted.
+ * - [key] reads one owner's `assistant_pubkey`, `encrypted_nsec` and `nsec`, and opens them as the
+ *   server's `_plaintext_nsec` does: `encrypted_nsec` when it is non-empty (a value that is
+ *   already an `nsec1` is taken as it is, as `decrypt_nsec` does), `nsec` only otherwise. A stale
+ *   plaintext `nsec` beside a token is never used: the token wins.
  *
  * Neither the nsec, the token nor the plaintext is ever logged, and no exception that could carry
  * one escapes: a failure is a [KeyFailure].
@@ -85,10 +90,10 @@ interface AssistantDirectory {
 class AssistantKeys(
     private val db: Db,
     private val keyFile: FernetKeyFile,
-    private val view: String = VIEW,
+    private val table: String = TABLE,
 ) : AssistantDirectory {
     init {
-        require(VIEW_NAME.matches(view)) { "not a view name" }
+        require(TABLE_NAME.matches(table)) { "not a table name" }
     }
 
     override suspend fun page(
@@ -96,12 +101,12 @@ class AssistantKeys(
         limit: Int,
     ): List<AssistantPair> =
         db.use { c ->
-            // Two statements rather than `? IS NULL OR owner > ?`: Postgres can't type an untyped null parameter.
+            // Two statements rather than `? IS NULL OR pubkey > ?`: Postgres can't type an untyped null parameter.
             val sql =
                 if (after == null) {
-                    "SELECT owner, assistant FROM $view ORDER BY owner LIMIT ?"
+                    "SELECT pubkey, assistant_pubkey FROM $table WHERE assistant_pubkey IS NOT NULL ORDER BY pubkey LIMIT ?"
                 } else {
-                    "SELECT owner, assistant FROM $view WHERE owner > ? ORDER BY owner LIMIT ?"
+                    "SELECT pubkey, assistant_pubkey FROM $table WHERE assistant_pubkey IS NOT NULL AND pubkey > ? ORDER BY pubkey LIMIT ?"
                 }
             c.prepareStatement(sql).use { st ->
                 var i = 1
@@ -122,9 +127,10 @@ class AssistantKeys(
 
     override suspend fun key(owner: HexKey): AssistantKey {
         val row = db.use { c -> row(c, owner) } ?: return failed(owner, KeyFailure.NO_ASSISTANT)
+        val assistant = row.assistant ?: return failed(owner, KeyFailure.NO_ASSISTANT)
         val hex = plaintextOf(row)?.let { decodePrivateKeyAsHexOrNull(it.trim()) }?.takeIf { it.length == 64 }
         val keyPair = hex?.let(::keyPairOrNull) ?: return failed(owner, KeyFailure.NSEC_UNREADABLE)
-        if (keyPair.pubKey.toHexKey() != row.assistant.lowercase()) return failed(owner, KeyFailure.NSEC_MISMATCH)
+        if (keyPair.pubKey.toHexKey() != assistant.lowercase()) return failed(owner, KeyFailure.NSEC_MISMATCH)
         return AssistantKey.Ready(owner, NostrSignerInternal(keyPair))
     }
 
@@ -138,25 +144,25 @@ class AssistantKeys(
 
     /** One owner's row. Strings can't be wiped, so it lives only as long as [key] runs. */
     private class Row(
-        val assistant: String,
+        val assistant: String?,
         val encrypted: String?,
-        val legacy: String?,
+        val nsec: String?,
     )
 
     private fun row(
         c: Connection,
         owner: HexKey,
     ): Row? =
-        c.prepareStatement("SELECT assistant, encrypted_nsec, legacy_nsec FROM $view WHERE owner = ?").use { st ->
+        c.prepareStatement("SELECT assistant_pubkey, encrypted_nsec, nsec FROM $table WHERE pubkey = ?").use { st ->
             st.setString(1, owner)
             st.executeQuery().use { rs -> if (rs.next()) Row(rs.getString(1), rs.getString(2), rs.getString(3)) else null }
         }
 
-    /** The nsec's text, or null when nothing opens it. */
+    /** The nsec's text, or null when nothing opens it: the server's `_plaintext_nsec`. */
     private fun plaintextOf(row: Row): String? {
         val token = row.encrypted
         // The server's `if encrypted_nsec:` reads an empty token as none too.
-        if (token.isNullOrEmpty()) return row.legacy
+        if (token.isNullOrEmpty()) return row.nsec
         // The server's decrypt_nsec: a value that was never encrypted is used as it is.
         if (token.startsWith("nsec1")) return token
         val bytes = keyFile.decrypt(token) ?: return null
@@ -183,9 +189,12 @@ class AssistantKeys(
     companion object {
         private const val TAG = "AssistantKeys"
 
-        /** brainstorm_server's view, by its versioned name. */
-        const val VIEW = "assistant_keys_v1"
+        /** brainstorm_server's table (its `BrainstormNsec` model). */
+        const val TABLE = "brainstorm_nsec"
 
-        private val VIEW_NAME = Regex("[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?")
+        /** The only columns read, and the only ones ops grants the role (PLAN.md, "Roles and grants"). */
+        val COLUMNS = listOf("pubkey", "assistant_pubkey", "encrypted_nsec", "nsec")
+
+        private val TABLE_NAME = Regex("[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?")
     }
 }

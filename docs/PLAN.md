@@ -9,7 +9,7 @@ It gets an owner, opens Postgres, decrypts the Assistant's AI key, prints, signs
 and publishes to the Assistant's outbox relays.
 
 **brainstorm_server (Python) is never involved in a run.** It owns:
-- the `assistant_keys_v1` view, one migration;
+- the `brainstorm_nsec` table, which the services read four columns of, as its own repo does;
 - the Fernet key file, which it writes and rotates.
 
 The authorities, which win when this repo disagrees with them:
@@ -23,10 +23,10 @@ The authorities, which win when this repo disagrees with them:
 |---|---|---|---|
 | Does | finds due occurrences, wakes the service | re-checks, prints, signs, publishes | creates Assistants, AI-key endpoints |
 | Keys | decrypts schedules only (the owner as peer) | decrypts the schedule and the Assistant's 12000; signs its own task's events | holds and rotates |
-| Postgres | reads `assistant_keys_v1` and `assistant_runner.runs` | reads the view; writes `assistant_runner.*` | owns `brainstorm_nsec` and the view |
+| Postgres | reads four columns of `brainstorm_nsec` and `assistant_runner.runs` | reads the same four columns; writes `assistant_runner.*` | owns `brainstorm_nsec` |
 | Talks to | relays; the service's trigger endpoint | relays, Blossom, the AI endpoint | |
 
-- **`:core`** is a library both use: Fernet, the key view, the `assistant_runner` schema and its
+- **`:core`** is a library both use: Fernet, the key read, the `assistant_runner` schema and its
   stores, the advisory lock.
 - **Why the runner needs keys too:** NIP-FB keeps every tag but `d` and `p` private, `cron`
   included, so knowing when a schedule is due takes a decrypt.
@@ -41,8 +41,9 @@ If that connection drops, the runner exits and the orchestrator restarts it.
 
 Each poll (default every 5 minutes):
 
-1. **Pairs.** Page `SELECT owner, assistant FROM assistant_keys_v1 ORDER BY owner`. Nothing is
-   decrypted to list them.
+1. **Pairs.** Page `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE assistant_pubkey IS
+   NOT NULL ORDER BY pubkey` (by `pubkey > ?`), the server's own `select_owner_assistant_pairs_on_db`.
+   Nothing is decrypted to list them.
 2. **Schedules.** Read kind 34817 by author (the owners), with the quorum rules the
    the-nostr-observer worker already has (`RunnerRelays`, moved here as is):
    - index relays first, then each owner's NIP-65 write relays;
@@ -88,24 +89,20 @@ The service is idempotent per owner: a wake for an owner already printing joins 
 
 ### The keys
 
-- **`assistant_keys_v1`** (brainstorm_server migration):
-  ```sql
-  CREATE VIEW assistant_keys_v1 AS
-  SELECT pubkey AS owner,
-         assistant_pubkey AS assistant,
-         encrypted_nsec,
-         CASE WHEN encrypted_nsec IS NULL OR encrypted_nsec = '' THEN nsec END AS legacy_nsec
-  FROM brainstorm_nsec
-  WHERE assistant_pubkey IS NOT NULL;
-  ```
-  - `legacy_nsec` mirrors the server's own fallback (`_plaintext_nsec`, whose `if encrypted_nsec:`
-    also reads an empty string as none) for rows not yet encrypted.
-  - `brainstorm_nsec.nsec` is `NOT NULL` and still holds the plaintext even beside an
-    `encrypted_nsec`. That is the server's to drop, so the view exposes it only where there is
-    nothing else.
-- **`AssistantKeys`** reads one row per owner it needs and decrypts it. The nsec must give the
-  stored `assistant` pubkey, or the result is `NSEC_MISMATCH`. The key is held in memory only, and
-  never logged.
+- **`brainstorm_nsec`**, brainstorm_server's table, read as its repo (`app/repos/brainstorm_nsec.py`)
+  reads it. There is no view and no migration on the server's side: the services read four of its
+  columns, `pubkey`, `assistant_pubkey`, `encrypted_nsec` and `nsec`, and **are coupled to them**. A
+  server migration that renames or drops one breaks the runner and every task service.
+- **`AssistantKeys`** reads one row per owner it needs,
+  `SELECT assistant_pubkey, encrypted_nsec, nsec FROM brainstorm_nsec WHERE pubkey = ?`, and opens
+  it as the server's `_plaintext_nsec` does:
+  - `encrypted_nsec` when it is non-empty, decrypted with the key file (a value that already
+    starts `nsec1` is taken as it is, as `decrypt_nsec` does);
+  - `nsec` only otherwise. `nsec` is `NOT NULL` and may still hold a stale plaintext beside a
+    token: the token wins, and that plaintext is never used.
+  - No row, or one with no `assistant_pubkey`, is `NO_ASSISTANT`. The nsec must give the stored
+    `assistant_pubkey`, or the result is `NSEC_MISMATCH`. The key is held in memory only, and never
+    logged.
 - **The Fernet keys** are a file of comma-separated keys (`NSEC_KEYS_FILE`, default
   `/run/secrets/nsec_encryption_keys`), tried in order, as Python's `MultiFernet` does.
   - The file is re-read when its modification time changes, and once more on a token no key
@@ -140,13 +137,13 @@ SQL in `core/src/main/resources/assistant_runner/`, with a `schema_version` tabl
 
 ```sql
 CREATE ROLE assistant_runner LOGIN PASSWORD '…';
-GRANT SELECT ON assistant_keys_v1 TO assistant_runner;   -- the view, not the table
+GRANT SELECT (pubkey, assistant_pubkey, encrypted_nsec, nsec) ON brainstorm_nsec TO assistant_runner;
 CREATE SCHEMA IF NOT EXISTS assistant_runner AUTHORIZATION assistant_runner;
 ```
 
-A view runs with its owner's rights, so the role sees the four columns and nothing else of
-`brainstorm_nsec`. The runner and the Observer may share this role, or each get its own with the
-same grants.
+A column grant: the role reads those four columns of `brainstorm_nsec` and is refused every other
+one (`session_version`, `nip05_local_part`, `SELECT *`). The runner and the Observer may share this
+role, or each get its own with the same grants.
 
 ## Configuration (`:runner`)
 
