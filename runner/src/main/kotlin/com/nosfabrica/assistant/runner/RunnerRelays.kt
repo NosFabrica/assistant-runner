@@ -448,8 +448,8 @@ class RunnerNostr(
         /** The most REQs [byAuthors] sends one relay for each [AUTHORS_PER_REQ] authors of one batch read. */
         const val MAX_REQS_PER_RELAY = 64
 
-        /** How many relays a batch read asks at once. */
-        const val RELAY_PARALLELISM = 16
+        /** How many relays a batch read asks at once: with the read budget, what bounds a poll's memory ([RELAY_WORST_CASE_BYTES]). */
+        const val RELAY_PARALLELISM = 8
 
         /** [QuartzRelayAccess.FETCH_DEADLINE_MS] and a little more: the backstop over any [RelayAccess]. */
         const val READ_DEADLINE_MS = QuartzRelayAccess.FETCH_DEADLINE_MS + 5_000

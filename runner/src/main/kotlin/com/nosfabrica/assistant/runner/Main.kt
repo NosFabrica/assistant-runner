@@ -59,10 +59,22 @@ class RunnerConfig(
     }
 }
 
-/** What an owner's relay socket may read per [RELAY_READ_WINDOW_MS]: far over any schedule list, far under the heap. */
-const val RELAY_READ_BUDGET_BYTES = 16L * 1024 * 1024
+/**
+ * What an owner's relay socket may read per [RELAY_READ_WINDOW_MS]: far over a page of schedules
+ * (at most [QuartzRelayAccess.MAX_EVENTS_PER_RELAY] events of about 1 KB), far under the heap.
+ * Frames are never compressed ([NoWebSocketCompression]), so these bytes are the message's.
+ */
+const val RELAY_READ_BUDGET_BYTES = 4L * 1024 * 1024
 
 const val RELAY_READ_WINDOW_MS = 10_000L
+
+/**
+ * The most an owner's relays can make one poll hold at once: [RunnerNostr.RELAY_PARALLELISM]
+ * relays, each read for at most [QuartzRelayAccess.FETCH_DEADLINE_MS], which spans three budget
+ * windows. 8 × 3 × 4 MB = 96 MB of frames, about twice that once decoded: under a 512 MB heap.
+ */
+const val RELAY_WORST_CASE_BYTES =
+    RunnerNostr.RELAY_PARALLELISM * (QuartzRelayAccess.FETCH_DEADLINE_MS / RELAY_READ_WINDOW_MS + 1) * RELAY_READ_BUDGET_BYTES
 
 private const val TAG = "AssistantRunner"
 

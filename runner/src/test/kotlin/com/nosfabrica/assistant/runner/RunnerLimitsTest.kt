@@ -64,4 +64,15 @@ class RunnerLimitsTest {
     fun theGuardedClientCapsBodies() {
         assertTrue(guardedClient(OkHttpClient()).interceptors.any { it is BodyCapInterceptor })
     }
+
+    @Test
+    fun theGuardedClientNeverInflatesAWebSocketMessage() {
+        assertTrue(guardedClient(OkHttpClient(), setOf("wss")).interceptors.any { it is NoWebSocketCompression })
+    }
+
+    @Test
+    fun whatOwnersRelaysCanMakeOnePollHoldStaysUnder128Mb() {
+        // README.md and PLAN.md give this number: change them with it.
+        assertEquals(96L * 1024 * 1024, RELAY_WORST_CASE_BYTES)
+    }
 }

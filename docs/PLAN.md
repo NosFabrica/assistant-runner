@@ -58,7 +58,11 @@ Each poll (default every 5 minutes):
    - index relays first, then each owner's NIP-65 write relays;
    - a full page counts as unanswered;
    - every relay gets 20 s and 2,000 events;
-   - events must verify, and be dated at most 10 minutes ahead.
+   - events must verify, and be dated at most 10 minutes ahead;
+   - an owner's relay socket reads at most 4 MB per 10 s, uncompressed: `permessage-deflate` is
+     never offered, and a relay that compresses anyway is dropped (OkHttp would inflate a whole
+     message in memory, past what the socket counted). With 8 relays read at once, that bounds
+     what owners' relays can make a poll hold to about 96 MB of frames.
 3. **Runner check.** `ScheduledTaskClaims.checkRunner(event, assistant, owner)`: exactly one public
    `p`, the owner's Assistant, and the author is that owner.
 4. **Decrypt** the private tags with the Assistant's key (`AssistantKeys`). The plaintext is

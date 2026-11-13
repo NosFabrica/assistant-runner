@@ -33,7 +33,12 @@ copies into its tests), the server's four `brainstorm_nsec` columns and the Fern
 2. Reads every kind 34817 by those owners (by author, never `#p` or `#d`): the index relays first,
    then each owner's NIP-65 write relays, with the worker's quorum rules (a full page counts as
    unanswered; each relay gets 20 s and 2,000 events; events must verify and be dated at most 10
-   minutes ahead). It keeps the newest version of each `d`.
+   minutes ahead). It keeps the newest version of each `d`. An owner's relay is asked through the
+   SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
+   (`permessage-deflate` is not offered, and a relay that compresses anyway is dropped: OkHttp
+   inflates a whole message in memory, past any byte count). At most 8 relays are read at once,
+   so owners' relays can make one poll hold about 96 MB of frames at worst: give the container a
+   heap of 512 MB or more.
 3. `ScheduledTaskClaims.checkRunner(event, assistant, owner)`: exactly one public `p`, the owner's
    Assistant, authored by that owner. No `p` is `NOT_NAMED`; more than half the owner's write
    relays must have answered (`NO_QUORUM`).
