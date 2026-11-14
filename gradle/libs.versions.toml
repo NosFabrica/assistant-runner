@@ -1,0 +1,41 @@
+[versions]
+# Quartz's own Kotlin: its metadata is read by this compiler.
+kotlin = "2.4.21"
+app = "0.1.0"
+
+# Quartz from JitPack (vitorpamplona/quartz @ commit): NIP-FB's runner rules
+# (ScheduledTaskClaims.checkRunner / decideAsRunner): release 2.17.0 (tag v2.17.0) plus the
+# jitpack.yml change that publishes the iOS variants, the same commit the-nostr-observer and
+# Amethyst pin.
+#
+# A JitPack version IS a git commit hash, and hashes carry no order. Gradle sees version
+# STRINGS and, when two parts of the graph ask for different ones, keeps the lexicographically
+# higher, which for hashes is an arbitrary one, chosen silently. That is why every module
+# force()s this pin, and why "newer" is a word that does not apply here. The only relation
+# between two hashes is ancestry, and only git answers it:
+#   git merge-base --is-ancestor A B
+quartz = "8c21607e05e77ecf88de8013d849949362411176"
+
+coroutines = "1.11.0"
+serialization = "1.12.0"
+okhttp = "5.5.1"
+# BSD-2-Clause (its POM's <licenses>); its one required runtime dependency, checker-qual, is MIT.
+postgresql = "42.7.14"
+spotless = "8.8.0"
+ktlint = "1.7.1"
+
+[libraries]
+quartz = { module = "com.github.vitorpamplona.quartz:quartz", version.ref = "quartz" }
+
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+
+# The wake (POST {service}/v1/run) and the relay sockets.
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+diffplug-spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

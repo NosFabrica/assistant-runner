@@ -1,0 +1,128 @@
+# assistant-runner
+
+The Brainstorm Assistants' scheduler. It reads the NIP-FB scheduled tasks (kind 34817) whose
+owners named their Brainstorm Assistant as runner, and wakes the task's service when an
+occurrence is due. It prints nothing, signs nothing and spends nothing.
+
+The design is [`docs/PLAN.md`](docs/PLAN.md); the trigger contract is [`contract/v1/`](contract/v1/);
+the rules for working here are in [`AGENTS.md`](AGENTS.md).
+
+## What's here
+
+One module, **`:runner`**, the scheduler:
+- `Main.kt`, `Runner.kt`, `RunnerLoop.kt`, `TaskWaker.kt`, with the relay reads
+  (`RunnerRelays.kt`) and the SSRF guard (`SafeHttp.kt`) moved from the-nostr-observer's worker;
+- `Fernet`, `MultiFernet`, `FernetKeyFile`: brainstorm_server's nsec encryption, read from its key
+  file (re-read on an mtime change, and once more on a token no key opens);
+- `AssistantKeys` (an `AssistantDirectory`): brainstorm_server's `brainstorm_nsec` table, read as
+  its own repo reads it (four columns: `pubkey`, `assistant_pubkey`, `encrypted_nsec`, `nsec`; a
+  server migration that renames or drops one breaks the runner), paged without decrypting, and one
+  owner's Assistant key as a Quartz `NostrSignerInternal`, or `NO_ASSISTANT` / `NSEC_UNREADABLE` /
+  `NSEC_MISMATCH`;
+- `Db` (read-only) and `LeaderLock`: one active runner;
+- `WakeRequest`, `SettledAnswer`: the wake it sends and the answer it reads.
+
+**No code is shared with the task services.** The Observer has its own copy of the key reading and
+its own state; the two share only the wake's contract (the vectors in `contract/v1/`, which it
+copies into its tests), the server's four `brainstorm_nsec` columns and the Fernet key file.
+
+## What one poll does
+
+1. Pages `SELECT pubkey, assistant_pubkey FROM brainstorm_nsec WHERE pubkey ~ '^[0-9a-f]{64}$' AND
+   assistant_pubkey ~ '^[0-9a-f]{64}$' ORDER BY pubkey`, 500 at a time. Nothing is decrypted. A row
+   the server wrote wrong is left out by the query itself, so it never ends the paging early.
+2. Reads every kind 34817 by those owners (by author, never `#p` or `#d`): the index relays first,
+   then each owner's NIP-65 write relays, with the worker's quorum rules (each relay is asked in
+   chunks of 500 owners, a page at most 500 events; a full page, or one the event cap cut off, is
+   paged on with `until` and deduplicated by id, so a relay answers for a chunk only on a page that
+   isn't full; a CLOSED chunk is asked again in halves, never one owner twice, and not at all after
+   `rate-limited:` or `blocked:`; at most 64 REQs a relay per 500 owners; each relay gets 20 s and
+   2,000 events a read, never fewer than the `limit`; events must verify and be dated at most 10
+   minutes ahead, checked before copies are deduplicated). It keeps the newest version of each
+   `d`. Only an owner's first 8 write relays are asked, and the owners' relays all together get
+   120 s a poll. An owner's relay is asked through the SSRF guard, its socket reads at most 4 MB per 10 s, and its WebSocket is never compressed
+   (`permessage-deflate` is not offered, and a relay that compresses anyway is dropped: OkHttp
+   inflates a whole message in memory, past any byte count). At most 8 relays are read at once,
+   so owners' relays can make one poll hold about 96 MB of frames at worst: give the container a
+   heap of 512 MB or more.
+3. `ScheduledTaskClaims.checkRunner(event, assistant, owner)`: exactly one public `p`, the owner's
+   Assistant, authored by that owner. No `p` is `NOT_NAMED`; more than half the owner's write
+   relays must have answered (`NO_QUORUM`). The index relays stand in only for an owner an index
+   relay answered for in full and found no NIP-65 list for: a list read that failed (CLOSED, a
+   timeout, a cap) is `NO_QUORUM`, and so is a list whose every write relay is refused (`ws`, an
+   internal host).
+4. Decrypts the private tags with the Assistant's key, the owner as NIP-44 peer
+   (`ScheduledTaskEvent.task`). The plaintext stays in memory by event id. The keys a poll needs
+   are read in one query and zeroed after the poll; a key that won't open is not read again until
+   the key file changes (or an hour), and a version that won't decrypt is never tried again.
+5. The `task` tag picks the service (`TASK_URL_<TASK>`); others are `UNKNOWN_TASK`.
+6. Decides with `ScheduledTaskClaims.decideAsRunner`; "already started here" is the service's own
+   `200 {outcome}` for (task, owner, occurrence), kept in memory.
+7. Wakes `POST {TASK_URL_<TASK>}/v1/run` with `{"v":1,"task","owner","occurrence"}`, at most once
+   per (task, owner, occurrence) every `WAKE_RETRY_SECONDS`, or after a `429`'s `Retry-After`,
+   until the service answers `200`: then never again for that occurrence (kept per occurrence, for
+   two days, so two schedules of one task settle each their own; two due at the same occurrence
+   wake it once). A restart forgets what was settled, which costs at most one wake per due
+   occurrence, answered as settled.
+
+   A wake gets 5 s to connect and 10 s in all, and is cancelled with the poll. A `200` whose body
+   names no outcome settles nothing (`WAKE_FAILED`). After 3 failed wakes in a row a service
+   isn't woken again that poll (`SERVICE_UNAVAILABLE`). An owner with a wake pending, or a due
+   schedule last poll, has their own relays read every poll, index or not.
+
+The runner writes nothing, to Postgres or anywhere else.
+
+Outcomes are logged by owner and enum (`RunnerOutcome`), the steady ones at debug.
+
+## Configuration
+
+| Variable | Default | |
+|---|---|---|
+| `DATABASE_URL` | (required) | JDBC URL of brainstorm_server's Postgres, e.g. `jdbc:postgresql://postgres:5432/brainstorm`: **the primary, directly** (below). Don't set `options`, `socketTimeout` or `loginTimeout` in it: the URL's would replace the runner's |
+| `DATABASE_USER`, `DATABASE_PASSWORD` | | the `assistant_runner` role (below). A secret: from a k8s Secret |
+| `NSEC_KEYS_FILE` | `/run/secrets/nsec_encryption_keys` | the Fernet key file brainstorm_server writes, mounted read-only. A file with no key is logged as a warning at startup |
+| `INDEX_RELAYS` | `wss://search.brainstorm.world` | comma-separated `wss://` relays, at least one: anything else stops it at startup (status 2). The search relay is asked with `include:spam` |
+| `TASK_URL_<TASK>` | (at least one) | a task service's base URL, e.g. `TASK_URL_OBSERVER=http://observer:8080` |
+| `POLL_SECONDS` | `300` | at least 30 |
+| `WAKE_RETRY_SECONDS` | `600` | at least 60 |
+
+Exit status: `2` a bad setting, `4` the leader lock's connection died, `5` the loop failed. The
+orchestrator restarts it.
+
+## Deploying beside brainstorm_server
+
+CI (`.github/workflows/build.yml`) builds and pushes the image on every push, after the tests
+pass: `ghcr.io/nosfabrica/assistant-runner`, tagged with the branch name, `sha-<short>`, a `v*`
+tag's version, and `latest` on `main`. Staging pins one of those tags. By hand:
+
+    docker build -t assistant-runner .
+
+- One Deployment. Two replicas are safe (the second waits for the leader lock), but one is enough.
+  No Service, no Ingress: nothing connects to it.
+- **`DATABASE_URL` must be a direct, session-mode connection to the primary.** The leader lock is
+  a session advisory lock: behind pgbouncer in transaction mode its session is anyone's, and on a
+  standby every runner gets a lock of its own, so two would lead. The runner refuses to lead on a
+  standby (`pg_is_in_recovery()`), but it can't see a pooler.
+- Every database call is bounded: 10 s to connect, 15 s to log in, 30 s for an answer
+  (`socketTimeout`), and 30 s per statement on the server (`statement_timeout`). The lock's own
+  session sets TCP keepalives (30 s idle, 10 s apart, 3 tries) and a 60 s `tcp_user_timeout`, so
+  after a partition the server frees the lock within about a minute, not two hours; any role may
+  set them. While a poll runs the lock is checked every 5 s and the poll cancelled when it is
+  gone, and every wake waits on a check at most 5 s old.
+- Its role needs one column grant and nothing else: no schema, no CREATE (it writes nothing; the
+  advisory lock needs no grant):
+
+      CREATE ROLE assistant_runner LOGIN PASSWORD '…';
+      GRANT SELECT (pubkey, assistant_pubkey, encrypted_nsec, nsec) ON brainstorm_nsec TO assistant_runner;
+
+- Mount the same key file brainstorm_server writes (read-only). The runner holds each Assistant's
+  key only to read schedules.
+- Egress: Postgres, the task services inside the cluster, and WSS to relays, directly (an owner's
+  relay is refused when it names an internal host or resolves to one).
+
+## Build
+
+    ./gradlew build --max-workers=2
+
+The Postgres tests start a throwaway cluster (`initdb`) when the binaries are there, else use
+`TEST_DATABASE_URL` (CI's `postgres` service), else are skipped and say why.
